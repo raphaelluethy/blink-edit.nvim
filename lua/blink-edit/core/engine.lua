@@ -486,6 +486,120 @@ end
 -- Request Lifecycle
 -- =============================================================================
 
+--- Handle response from Sweep Remote API
+---@param bufnr number
+---@param err string|table|nil
+---@param result table|nil
+---@param metadata table
+---@param snapshot BlinkEditSnapshot
+local function on_sweep_remote_response(bufnr, err, result, metadata, snapshot)
+  -- Clear in_flight state
+  state.clear_in_flight(bufnr)
+
+  -- Hide progress indicator
+  ui.hide_progress()
+
+  local cfg = config.get()
+
+  -- Check if buffer is still valid
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+
+  -- Check if there's a pending snapshot in the stack
+  if state.has_pending_snapshot(bufnr) then
+    if vim.g.blink_edit_debug then
+      log.debug("Discarding stale sweep_remote response, processing stack")
+    end
+
+    local pending = state.pop_from_stack(bufnr)
+    if pending then
+      start_request(bufnr, pending)
+    end
+    return
+  end
+
+  -- Handle error
+  if err then
+    if type(err) == "table" then
+      local err_type = err.type
+      local err_message = err.message or "Unknown error"
+
+      if err_type == "auth" then
+        log.error("Sweep Remote: " .. err_message)
+      elseif err_type == "connection" or err_type == "curl_error" then
+        log.error("Cannot connect to Sweep API. Check your network connection.")
+      elseif err_type == "timeout" then
+        log.error("Sweep API request timed out")
+      elseif err_type == "server" then
+        log.error("Sweep API error: " .. err_message)
+      else
+        log.debug("Sweep request failed: " .. err_message, vim.log.levels.WARN)
+      end
+    else
+      log.debug("Sweep request failed: " .. tostring(err), vim.log.levels.WARN)
+    end
+    return
+  end
+
+  -- Handle empty response
+  if not result or not result.lines then
+    if vim.g.blink_edit_debug then
+      log.debug("Empty Sweep response", vim.log.levels.WARN)
+    end
+    return
+  end
+
+  local predicted_lines = result.lines
+
+  -- Log full response at debug level 2
+  if vim.g.blink_edit_debug and vim.g.blink_edit_debug >= 2 then
+    log.debug2("=== SWEEP RESPONSE ===\n" .. (result.text or "") .. "\n=== END SWEEP RESPONSE ===")
+  end
+
+  -- Check if prediction is same as current (no changes)
+  local has_changes = false
+  if #predicted_lines ~= #snapshot.lines then
+    has_changes = true
+  else
+    for i = 1, #predicted_lines do
+      if predicted_lines[i] ~= snapshot.lines[i] then
+        has_changes = true
+        break
+      end
+    end
+  end
+
+  if not has_changes then
+    if vim.g.blink_edit_debug then
+      log.debug("No changes detected in Sweep prediction")
+    end
+    return
+  end
+
+  -- Store prediction
+  local prediction = {
+    predicted_lines = predicted_lines,
+    snapshot_lines = snapshot.lines,
+    window_start = metadata.window_start,
+    window_end = metadata.window_end,
+    response_text = result.text or "",
+    created_at = (vim.uv or vim.loop).now(),
+    cursor = snapshot.cursor,
+  }
+  state.set_prediction(bufnr, prediction)
+
+  -- Render ghost text
+  ui.close_lsp_floats()
+  render.show(bufnr, prediction)
+
+  if vim.g.blink_edit_debug then
+    log.debug(
+      string.format("Showing Sweep prediction: %d snapshot lines -> %d predicted lines", #snapshot.lines, #predicted_lines)
+    )
+  end
+end
+
 --- Start a new prediction request (called when valve opens)
 ---@param bufnr number
 ---@param snapshot BlinkEditSnapshot
@@ -527,6 +641,59 @@ local function start_request(bufnr, snapshot)
     return
   end
 
+  -- Check for sweep_remote backend - it handles its own request building
+  if cfg.llm.backend == "sweep_remote" then
+    -- Get provider for requirements (still needed for context collection)
+    local provider = get_provider()
+    local requirements = provider:get_requirements()
+
+    -- Build context limits from config
+    local limits = {
+      max_history_tokens = cfg.context.history.max_tokens or 512,
+      max_context_tokens = cfg.context.max_tokens or 512,
+      max_history_entries = cfg.context.history.max_items or 5,
+      max_files = cfg.context.history.max_files or 2,
+    }
+
+    -- Collect context data
+    local context_data = context_manager.collect(bufnr, baseline, snapshot, requirements, limits)
+
+    local metadata = {
+      window_start = snapshot.window_start,
+      window_end = snapshot.window_end,
+    }
+
+    if vim.g.blink_edit_debug then
+      log.debug(
+        string.format(
+          "Starting Sweep Remote request, window=%d-%d, history=%d",
+          metadata.window_start,
+          metadata.window_end,
+          #context_data.history
+        )
+      )
+    end
+
+    -- Send request to sweep_remote backend
+    local request_id = backend.complete({
+      context = context_data,
+      baseline = baseline,
+      snapshot = snapshot,
+    }, function(err, result)
+      vim.schedule(function()
+        on_sweep_remote_response(bufnr, err, result, metadata, snapshot)
+      end)
+    end)
+
+    -- Track in_flight state
+    state.set_in_flight(bufnr, request_id)
+
+    -- Show progress indicator
+    ui.show_progress()
+    return
+  end
+
+  -- Standard flow for other backends
   -- Get provider
   local provider = get_provider()
 

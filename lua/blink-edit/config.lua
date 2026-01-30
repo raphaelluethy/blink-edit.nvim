@@ -18,9 +18,14 @@
 ---@field num_thread number|nil
 ---@field options table|nil
 
+---@class BlinkEditBackendSweepRemoteConfig
+---@field url string
+---@field endpoint string
+
 ---@class BlinkEditBackendsConfig
 ---@field openai BlinkEditBackendOpenAIConfig
 ---@field ollama BlinkEditBackendOllamaConfig
+---@field sweep_remote BlinkEditBackendSweepRemoteConfig
 
 ---@class BlinkEditHistoryConfig
 ---@field enabled boolean
@@ -99,6 +104,7 @@ local LEGACY_LLM_KEYS = {
 local VALID_BACKENDS = {
   openai = true,
   ollama = true,
+  sweep_remote = true,
 }
 
 local VALID_PROVIDERS = {
@@ -154,6 +160,10 @@ local defaults = {
       num_gpu = nil,
       num_thread = nil,
       options = {},
+    },
+    sweep_remote = {
+      url = "https://autocomplete.sweep.dev",
+      endpoint = "/backend/next_edit_autocomplete",
     },
   },
 
@@ -333,7 +343,10 @@ local function validate_config(cfg)
 
   if not VALID_BACKENDS[cfg.llm.backend] then
     error(
-      string.format("[blink-edit] Invalid llm.backend '%s'. Must be one of: openai, ollama", tostring(cfg.llm.backend))
+      string.format(
+        "[blink-edit] Invalid llm.backend '%s'. Must be one of: openai, ollama, sweep_remote",
+        tostring(cfg.llm.backend)
+      )
     )
   end
 

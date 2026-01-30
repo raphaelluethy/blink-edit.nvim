@@ -86,6 +86,20 @@ local global_history_files = {}
 ---@type BlinkEditSelection|nil
 local global_selection = nil
 
+---@class RecentFile
+---@field filepath string Normalized file path
+---@field content string First N lines of the file
+---@field end_line number Last line included in content
+---@field timestamp number When the file was accessed
+
+-- Maximum number of recent files to track
+local MAX_RECENT_FILES = 5
+-- Maximum lines to capture per file
+local MAX_LINES_PER_FILE = 30
+
+---@type RecentFile[]
+local recent_files = {}
+
 -- =============================================================================
 -- Helper Functions
 -- =============================================================================
@@ -673,6 +687,98 @@ function M.clear_selection(bufnr)
 end
 
 -- =============================================================================
+-- Recent Files Management
+-- =============================================================================
+
+--- Record file access for recent files tracking
+---@param bufnr number
+function M.record_file_access(bufnr)
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+
+  -- Skip special buffer types
+  local buftype = vim.bo[bufnr].buftype
+  if buftype ~= "" then
+    return
+  end
+
+  local filepath = vim.api.nvim_buf_get_name(bufnr)
+  if not filepath or filepath == "" then
+    return
+  end
+
+  filepath = utils.normalize_filepath(filepath)
+
+  -- Remove existing entry for this file if present
+  local new_recent = {}
+  for _, file in ipairs(recent_files) do
+    if file.filepath ~= filepath then
+      table.insert(new_recent, file)
+    end
+  end
+  recent_files = new_recent
+
+  -- Get first N lines of the file
+  local ok, lines = pcall(vim.api.nvim_buf_get_lines, bufnr, 0, MAX_LINES_PER_FILE, false)
+  if not ok or not lines then
+    return
+  end
+
+  local line_count = vim.api.nvim_buf_line_count(bufnr)
+  local end_line = math.min(MAX_LINES_PER_FILE, line_count)
+
+  -- Add new entry at the end (most recent)
+  table.insert(recent_files, {
+    filepath = filepath,
+    content = table.concat(lines, "\n"),
+    end_line = end_line,
+    timestamp = vim.uv.now(),
+  })
+
+  -- Trim to max size (keep most recent)
+  while #recent_files > MAX_RECENT_FILES do
+    table.remove(recent_files, 1)
+  end
+
+  if vim.g.blink_edit_debug and vim.g.blink_edit_debug >= 2 then
+    log.debug(string.format("Recorded file access: %s (total: %d)", filepath, #recent_files))
+  end
+end
+
+--- Get recent files excluding a specific filepath
+---@param exclude_filepath string|nil Filepath to exclude (typically current file)
+---@param limit number|nil Maximum number of files to return
+---@return RecentFile[]
+function M.get_recent_files(exclude_filepath, limit)
+  local result = {}
+
+  -- Iterate from most recent to oldest
+  for i = #recent_files, 1, -1 do
+    local file = recent_files[i]
+    if file.filepath ~= exclude_filepath then
+      table.insert(result, file)
+      if limit and #result >= limit then
+        break
+      end
+    end
+  end
+
+  return result
+end
+
+--- Clear recent files
+function M.clear_recent_files()
+  recent_files = {}
+end
+
+--- Get recent files count (for debugging)
+---@return number
+function M.get_recent_files_count()
+  return #recent_files
+end
+
+-- =============================================================================
 -- Buffer Helpers
 -- =============================================================================
 
@@ -727,6 +833,7 @@ function M.clear_all()
   global_history = {}
   global_history_files = {}
   global_selection = nil
+  recent_files = {}
 end
 
 --- Get buffer state (for debugging)

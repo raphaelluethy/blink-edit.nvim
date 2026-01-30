@@ -10,6 +10,7 @@ local commands = require("blink-edit.commands")
 local engine = require("blink-edit.core.engine")
 local render = require("blink-edit.core.render")
 local state = require("blink-edit.core.state")
+local user_actions = require("blink-edit.core.user_actions")
 local utils = require("blink-edit.utils")
 local log = require("blink-edit.log")
 
@@ -287,6 +288,7 @@ function M._setup_autocmds()
     group = augroup,
     callback = function(args)
       state.clear(args.buf)
+      user_actions.clear(args.buf)
     end,
     desc = "Cleanup blink-edit state on buffer delete",
   })
@@ -312,6 +314,24 @@ function M._setup_autocmds()
       end
     end,
     desc = "Capture yanked selection for blink-edit",
+  })
+
+  -- Track recent file access for sweep_remote backend
+  vim.api.nvim_create_autocmd("BufEnter", {
+    group = augroup,
+    callback = function(args)
+      state.record_file_access(args.buf)
+    end,
+    desc = "Track recent file access for blink-edit",
+  })
+
+  -- User action tracking: capture state before text changes
+  vim.api.nvim_create_autocmd("InsertCharPre", {
+    group = augroup,
+    callback = function(args)
+      user_actions.capture_state(args.buf)
+    end,
+    desc = "Capture state before text change for blink-edit user action tracking",
   })
 end
 
@@ -371,6 +391,9 @@ function M._on_text_changed(bufnr)
   cancel_normal_mode_timer()
   engine.cancel_prefetch(bufnr)
 
+  -- Detect user actions from text change
+  user_actions.detect_changes(bufnr)
+
   if state.consume_suppress_trigger(bufnr) then
     return
   end
@@ -399,6 +422,12 @@ end
 --- Called on cursor move in insert mode
 ---@param bufnr number
 function M._on_cursor_moved(bufnr)
+  -- Track cursor movements for user actions
+  local ok, cursor = pcall(vim.api.nvim_win_get_cursor, 0)
+  if ok and cursor then
+    user_actions.record_cursor_move(bufnr, cursor[1], cursor[2])
+  end
+
   engine.on_cursor_moved(bufnr)
 end
 
@@ -554,6 +583,9 @@ function M.reset()
 
   -- Close transport connections
   transport.close_all()
+
+  -- Clear user actions
+  user_actions.clear_all()
 
   initialized = false
 
