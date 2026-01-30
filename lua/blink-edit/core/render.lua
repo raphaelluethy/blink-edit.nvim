@@ -306,19 +306,22 @@ local function show_modification(bufnr, hunk, window_start, extmark_list)
   end
 end
 
---- Check if completion menu (pum) is visible
+--- Cached pumvisible check to avoid lag
+---@type boolean|nil
+local cached_pumvisible = nil
+---@type number|nil
+local cached_pumvisible_time = nil
+
+--- Check if completion menu (pum) is visible (cached for 50ms to prevent lag)
 ---@return boolean
 local function is_completion_menu_visible()
-  return vim.fn.pumvisible() == 1
-end
-
---- Get the cursor screen position
----@return number row, number col
-local function get_cursor_screen_pos()
-  local pos = vim.api.nvim_win_get_cursor(0)
-  local screen_row = vim.fn.screenrow()
-  local screen_col = vim.fn.screencol()
-  return screen_row, screen_col
+  local now = vim.loop.now()
+  if cached_pumvisible_time and (now - cached_pumvisible_time) < 50 then
+    return cached_pumvisible
+  end
+  cached_pumvisible = vim.fn.pumvisible() == 1
+  cached_pumvisible_time = now
+  return cached_pumvisible
 end
 
 --- Render a single-line insertion inline at the cursor or in hover window
@@ -451,6 +454,23 @@ local function get_jump_anchor_line(bufnr, hunk, window_start)
   return anchor_line_0
 end
 
+--- Show a jump indicator inline at the end of a line
+---@param bufnr number
+---@param line_0 number 0-indexed line number
+---@param extmark_list number[]
+local function show_jump_indicator_inline(bufnr, line_0, extmark_list)
+  local ok, line_data = pcall(vim.api.nvim_buf_get_lines, bufnr, line_0, line_0 + 1, false)
+  local line_content = (ok and line_data[1]) or ""
+  local col = #line_content
+
+  local mark_id = vim.api.nvim_buf_set_extmark(bufnr, ns, line_0, col, {
+    virt_text = { { JUMP_TEXT, "BlinkEditJump" } },
+    virt_text_pos = "overlay",
+    hl_mode = "combine",
+  })
+  table.insert(extmark_list, mark_id)
+end
+
 --- Show a jump indicator for the next hunk (rendered as a virtual line below the target)
 ---@param bufnr number
 ---@param hunk DiffHunk
@@ -541,6 +561,7 @@ function M.show(bufnr, prediction)
   local first_hunk = nil
   local cfg = config.get()
   local hover_shown = false
+  local inline_at_cursor = false -- Track if we're showing inline at cursor
 
   local current_win = vim.api.nvim_get_current_win()
 
@@ -554,19 +575,19 @@ function M.show(bufnr, prediction)
       if hunk.type == "insertion" then
         local handled = false
         if cfg.mode == "completion" then
-          if hunk.count_new == 1 and cursor and hunk.start_old == cursor_offset then
-            -- Try inline first, if that fails (completion menu visible), use hover
+          -- Check if completion menu is visible - if so, use hover window
+          local pum_visible = is_completion_menu_visible()
+          
+          if hunk.count_new == 1 and cursor and hunk.start_old == cursor_offset and not pum_visible then
+            -- Only show inline when completion menu is NOT visible
             handled = show_inline_insertion(bufnr, hunk, cursor, window_start, current_win, extmarks[bufnr])
-            if not handled and not hover_shown then
-              -- Single line at cursor but completion visible - use hover
-              local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
-              local preview_win, preview_buf = create_hover_window(current_win, hunk.new_lines, syntax_ft)
-              track_overlay_window(bufnr, preview_win, preview_buf)
-              hover_shown = true
-              handled = true
+            if handled then
+              inline_at_cursor = true
             end
-          elseif hunk.count_new >= 1 and not hover_shown then
-            -- Multi-line insertions or insertions not at cursor - use hover
+          end
+          
+          -- Use hover window for: multi-line, not at cursor, or when completion is visible
+          if not handled and not hover_shown then
             local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
             local preview_win, preview_buf = create_hover_window(current_win, hunk.new_lines, syntax_ft)
             track_overlay_window(bufnr, preview_win, preview_buf)
@@ -618,19 +639,19 @@ function M.show(bufnr, prediction)
     if fallback.type == "insertion" then
       local handled = false
       if cfg.mode == "completion" then
-        if fallback.count_new == 1 and cursor and fallback.start_old == cursor_offset then
-          -- Try inline first, if that fails (completion menu visible), use hover
+        -- Check if completion menu is visible - if so, use hover window
+        local pum_visible = is_completion_menu_visible()
+        
+        if fallback.count_new == 1 and cursor and fallback.start_old == cursor_offset and not pum_visible then
+          -- Only show inline when completion menu is NOT visible
           handled = show_inline_insertion(bufnr, fallback, cursor, window_start, current_win, extmarks[bufnr])
-          if not handled and not hover_shown then
-            -- Single line at cursor but completion visible - use hover
-            local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
-            local preview_win, preview_buf = create_hover_window(current_win, fallback.new_lines, syntax_ft)
-            track_overlay_window(bufnr, preview_win, preview_buf)
-            hover_shown = true
-            handled = true
+          if handled then
+            inline_at_cursor = true
           end
-        elseif fallback.count_new >= 1 and not hover_shown then
-          -- Multi-line insertions or insertions not at cursor - use hover
+        end
+        
+        -- Use hover window for: multi-line, not at cursor, or when completion is visible
+        if not handled and not hover_shown then
           local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
           local preview_win, preview_buf = create_hover_window(current_win, fallback.new_lines, syntax_ft)
           track_overlay_window(bufnr, preview_win, preview_buf)
@@ -662,7 +683,9 @@ function M.show(bufnr, prediction)
     first_hunk = fallback
   end
 
-  if first_hunk then
+  if first_hunk and not inline_at_cursor then
+    -- Only show TAB indicator when not showing inline at cursor
+    -- (ghost text is already visible on the same line)
     show_jump_indicator(bufnr, first_hunk, window_start, extmarks[bufnr])
   end
 
