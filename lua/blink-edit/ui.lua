@@ -525,11 +525,54 @@ function M.status()
 end
 
 -- =============================================================================
--- Progress Indicator
+-- Progress Indicator (LSP-style animated spinner)
 -- =============================================================================
+-- Displays an animated Braille spinner in the bottom-right corner while
+-- a prediction request is in-flight. Uses UV timer for smooth 80ms animation.
+-- The spinner is non-blocking and automatically stops when the request completes.
+
+local SPINNER_FRAMES = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
+local SPINNER_INTERVAL_MS = 80
 
 ---@type BlinkEditFloat|nil
 local progress_float = nil
+
+---@type userdata|nil UV timer for spinner animation
+local spinner_timer = nil
+
+---@type number Current spinner frame index (1-indexed)
+local spinner_frame = 1
+
+--- Stop and cleanup the spinner timer
+local function stop_spinner_timer()
+  if spinner_timer and not spinner_timer:is_closing() then
+    spinner_timer:stop()
+    spinner_timer:close()
+  end
+  spinner_timer = nil
+  spinner_frame = 1
+end
+
+--- Update spinner frame in the progress float
+local function update_spinner()
+  if not progress_float or not progress_float:is_valid() then
+    stop_spinner_timer()
+    return
+  end
+
+  spinner_frame = (spinner_frame % #SPINNER_FRAMES) + 1
+  local frame = SPINNER_FRAMES[spinner_frame]
+  local text = frame .. " thinking…"
+
+  progress_float:set_lines({ " " .. text })
+
+  -- Reapply highlight
+  local ns = vim.api.nvim_create_namespace("blink_edit_progress")
+  if progress_float.buf and vim.api.nvim_buf_is_valid(progress_float.buf) then
+    vim.api.nvim_buf_clear_namespace(progress_float.buf, ns, 0, -1)
+    vim.api.nvim_buf_add_highlight(progress_float.buf, ns, "BlinkEditProgress", 0, 0, -1)
+  end
+end
 
 --- Show progress indicator (call when request starts)
 function M.show_progress()
@@ -545,15 +588,18 @@ function M.show_progress()
     return
   end
 
-  local text = "thinking..."
+  spinner_frame = 1
+  local frame = SPINNER_FRAMES[spinner_frame]
+  local text = frame .. " thinking…"
+  local display_width = vim.fn.strdisplaywidth(text) + 2 -- +2 for padding
 
   progress_float = Float.new({
-    width = #text + 2,
+    width = display_width,
     height = 1,
     border = "rounded",
     relative = "editor",
     row = vim.o.lines - 4,
-    col = vim.o.columns - #text - 6,
+    col = vim.o.columns - display_width - 4,
     focusable = false,
     zindex = 40,
   })
@@ -563,10 +609,19 @@ function M.show_progress()
   -- Apply highlight
   local ns = vim.api.nvim_create_namespace("blink_edit_progress")
   vim.api.nvim_buf_add_highlight(progress_float.buf, ns, "BlinkEditProgress", 0, 0, -1)
+
+  -- Start spinner animation timer
+  stop_spinner_timer()
+  local uv = vim.uv or vim.loop
+  spinner_timer = uv.new_timer()
+  spinner_timer:start(SPINNER_INTERVAL_MS, SPINNER_INTERVAL_MS, function()
+    vim.schedule(update_spinner)
+  end)
 end
 
 --- Hide progress indicator (call when request completes)
 function M.hide_progress()
+  stop_spinner_timer()
   if progress_float then
     progress_float:close()
     progress_float = nil
