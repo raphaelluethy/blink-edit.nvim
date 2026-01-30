@@ -313,6 +313,11 @@ function M.complete(opts, callback)
   local url = sweep_cfg.url or "https://autocomplete.sweep.dev"
   local endpoint = sweep_cfg.endpoint or "/backend/next_edit_autocomplete"
 
+  -- Debug: log the request details
+  log.debug(string.format("Sweep request URL: %s%s", url, endpoint))
+  log.debug(string.format("Sweep token length: %d", #token))
+  log.debug(string.format("Sweep token first/last chars: %s...%s", token:sub(1, 4), token:sub(-4)))
+
   local request_id = transport.request({
     url = url .. endpoint,
     method = "POST",
