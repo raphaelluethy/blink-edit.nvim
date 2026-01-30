@@ -166,7 +166,9 @@ function M.format_entries()
   }
 
   for _, entry in ipairs(log_entries) do
-    local line = string.format("[%s] [%s] %s", entry.timestamp, entry.level_name, entry.message)
+    -- Escape newlines in message to prevent nvim_buf_set_lines error
+    local message = entry.message:gsub("\n", "\\n")
+    local line = string.format("[%s] [%s] %s", entry.timestamp, entry.level_name, message)
     table.insert(lines, line)
   end
 
