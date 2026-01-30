@@ -184,6 +184,8 @@ local defaults = {
   ---------------------------------------------------------
   debounce_ms = 50, -- Delay before sending request
   cancel_in_flight = true, -- Cancel TCP when new request queued (faster iteration)
+  min_request_interval_ms = 200, -- Minimum time between API requests (rate limit)
+  cooldown_after_response_ms = 100, -- Cooldown after receiving a response
 
   ---------------------------------------------------------
   -- Context Window
@@ -226,7 +228,7 @@ local defaults = {
   -- Keymaps
   ---------------------------------------------------------
   accept_key = "<Tab>", -- Accept prediction
-  reject_key = "<Esc>", -- Reject prediction
+  reject_key = "<C-]>", -- Reject prediction (Ctrl+])
   -- Tab only triggers when prediction is visible
   -- Falls through to default Tab otherwise
 

@@ -29,6 +29,19 @@ local debounce_timers = {}
 local provider_cache = {}
 
 local merge_completion
+local start_request -- forward declaration
+
+-- =============================================================================
+-- Rate Limiting State
+-- =============================================================================
+-- Prevents API spam by tracking request/response timestamps per buffer.
+-- - min_request_interval_ms: minimum time between consecutive requests
+-- - cooldown_after_response_ms: delay after receiving a response before next request
+
+---@type table<number, number> bufnr -> last request timestamp (ms)
+local last_request_time = {}
+---@type table<number, number> bufnr -> last response timestamp (ms)
+local last_response_time = {}
 
 -- =============================================================================
 -- Provider Management
@@ -493,6 +506,9 @@ end
 ---@param metadata table
 ---@param snapshot BlinkEditSnapshot
 local function on_sweep_remote_response(bufnr, err, result, metadata, snapshot)
+  -- Record response time for rate limiting
+  last_response_time[bufnr] = uv.now()
+
   -- Clear in_flight state
   state.clear_in_flight(bufnr)
 
@@ -612,8 +628,38 @@ end
 --- Start a new prediction request (called when valve opens)
 ---@param bufnr number
 ---@param snapshot BlinkEditSnapshot
-local function start_request(bufnr, snapshot)
+function start_request(bufnr, snapshot)
   local cfg = config.get()
+  local now = uv.now()
+
+  -- Rate limiting: check minimum interval between requests
+  local min_interval = cfg.min_request_interval_ms or 200
+  local last_req = last_request_time[bufnr] or 0
+  local last_resp = last_response_time[bufnr] or 0
+  local cooldown = cfg.cooldown_after_response_ms or 100
+
+  -- Check if we're within the minimum request interval
+  if now - last_req < min_interval then
+    if vim.g.blink_edit_debug then
+      log.debug(string.format("Rate limited: %dms since last request (min=%dms)", now - last_req, min_interval))
+    end
+    -- Push back to stack so it can be retried
+    state.push_to_stack(bufnr, snapshot)
+    return
+  end
+
+  -- Check if we're within cooldown after last response
+  if now - last_resp < cooldown then
+    if vim.g.blink_edit_debug then
+      log.debug(string.format("Cooldown: %dms since last response (cooldown=%dms)", now - last_resp, cooldown))
+    end
+    -- Push back to stack so it can be retried
+    state.push_to_stack(bufnr, snapshot)
+    return
+  end
+
+  -- Record request time
+  last_request_time[bufnr] = now
 
   -- Get baseline (captured on InsertEnter)
   local baseline = state.get_baseline(bufnr)
@@ -939,6 +985,9 @@ end
 ---@param snapshot BlinkEditSnapshot
 ---@param provider BlinkEditProvider
 function on_response(bufnr, err, result, metadata, snapshot, provider)
+  -- Record response time for rate limiting
+  last_response_time[bufnr] = uv.now()
+
   -- Clear in_flight state
   state.clear_in_flight(bufnr)
 
@@ -1650,6 +1699,10 @@ function M.cleanup()
 
   -- Clear provider cache
   provider_cache = {}
+
+  -- Clear rate limiting state
+  last_request_time = {}
+  last_response_time = {}
 
   -- Clear all state
   state.clear_all()
