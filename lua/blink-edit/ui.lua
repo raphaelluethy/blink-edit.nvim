@@ -413,12 +413,19 @@ function M.status()
   -- Empty line after logo
   table.insert(lines, "")
 
+  -- Determine URL based on backend
+  local display_url = cfg.llm.url
+  if cfg.llm.backend == "sweep_remote" then
+    local sweep_cfg = cfg.backends and cfg.backends.sweep_remote or {}
+    display_url = sweep_cfg.url or "https://autocomplete.sweep.dev"
+  end
+
   -- Status data
   local data = {
     { "Provider", cfg.llm.provider },
     { "Backend", cfg.llm.backend },
     { "Model", cfg.llm.model },
-    { "URL", cfg.llm.url:gsub("^https?://", "") },
+    { "URL", display_url:gsub("^https?://", "") },
     { "", "" }, -- separator
     { "Server", "checking..." },
     { "In-flight", state.is_in_flight(bufnr) and "yes" or "no" },

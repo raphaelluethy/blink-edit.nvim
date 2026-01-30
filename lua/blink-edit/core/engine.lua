@@ -533,6 +533,15 @@ local function on_sweep_remote_response(bufnr, err, result, metadata, snapshot)
         log.error("Sweep API request timed out")
       elseif err_type == "server" then
         log.error("Sweep API error: " .. err_message)
+      elseif err_type == "parse" then
+        -- Parse errors include "no completion" - log at info level
+        if err_message == "no completion" then
+          if vim.g.blink_edit_debug then
+            log.debug("Sweep API returned no completion suggestion")
+          end
+        else
+          log.warn("Sweep response parse error: " .. err_message)
+        end
       else
         log.debug("Sweep request failed: " .. err_message, vim.log.levels.WARN)
       end

@@ -328,19 +328,37 @@ function M.complete(opts, callback)
       return
     end
 
+    -- Check HTTP status code first
+    local status = response.status or 0
+    if status == 401 or status == 403 then
+      callback({
+        type = "auth",
+        message = "Authentication failed (HTTP " .. status .. "). Check your SWEEP_AI_TOKEN.",
+        code = status,
+      }, nil)
+      return
+    elseif status >= 400 then
+      callback({
+        type = "server",
+        message = "HTTP error " .. status,
+        code = status,
+      }, nil)
+      return
+    end
+
     -- Parse response
     local body = response.body
     if type(body) == "string" then
       local ok, decoded = pcall(vim.json.decode, body)
       if not ok then
-        callback({ type = "parse", message = "Failed to parse JSON response" }, nil)
+        callback({ type = "parse", message = "Failed to parse JSON response: " .. tostring(body):sub(1, 100) }, nil)
         return
       end
       body = decoded
     end
 
-    -- Check for API errors
-    if body.error then
+    -- Check for API errors in response body
+    if body and body.error then
       local error_msg = body.error.message or body.error or vim.inspect(body.error)
       callback({
         type = "server",
