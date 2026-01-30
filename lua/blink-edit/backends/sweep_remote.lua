@@ -6,6 +6,7 @@ local M = {}
 local transport = require("blink-edit.transport")
 local config = require("blink-edit.config")
 local log = require("blink-edit.log")
+local brotli = require("blink-edit.utils.brotli")
 
 -- =============================================================================
 -- Byte Offset Conversion Helpers
@@ -318,7 +319,7 @@ function M.complete(opts, callback)
   log.debug(string.format("Sweep token length: %d", #token))
   log.debug(string.format("Sweep token first/last chars: %s...%s", token:sub(1, 4), token:sub(-4)))
 
-  -- Encode payload
+  -- Encode payload and optionally compress with brotli
   local body = vim.json.encode(payload)
   local headers = {
     ["Content-Type"] = "application/json",
@@ -326,52 +327,18 @@ function M.complete(opts, callback)
     ["Connection"] = "keep-alive",
   }
 
-  -- Try to compress with brotli if available (like Zed does)
-  local use_compression = false
-  local brotli_cmd = sweep_cfg.brotli_cmd or "brotli"
-  local compressed_body = nil
-  
-  -- Check if brotli CLI is available
-  local brotli_check = vim.fn.executable(brotli_cmd)
-  if brotli_check == 1 then
-    -- Create temp files for compression
-    local temp_input = vim.fn.tempname() .. ".json"
-    local temp_output = temp_input .. ".br"
-    
-    -- Write body to temp file
-    local f = io.open(temp_input, "w")
-    if f then
-      f:write(body)
-      f:close()
-      
-      -- Compress with brotli (quality 1, as used by Zed)
-      local cmd = string.format("%s -q 1 -o %s %s 2>/dev/null", brotli_cmd, temp_output, temp_input)
-      local result = os.execute(cmd)
-      
-      if result == 0 then
-        -- Read compressed data
-        local cf = io.open(temp_output, "rb")
-        if cf then
-          compressed_body = cf:read("*all")
-          cf:close()
-          use_compression = true
-          log.debug("Using brotli compression for Sweep request")
-        end
-      end
-      
-      -- Cleanup temp files
-      os.remove(temp_input)
-      os.remove(temp_output)
+  -- Try to compress with brotli using FFI (fast, no IO)
+  if brotli.is_available() then
+    local compressed, err = brotli.compress(body, 1)  -- quality 1, same as Zed
+    if compressed then
+      body = compressed
+      headers["Content-Encoding"] = "br"
+      log.debug(string.format("Brotli compressed: %d -> %d bytes", #vim.json.encode(payload), #body))
+    else
+      log.debug("Brotli compression failed: " .. (err or "unknown error") .. ", sending uncompressed")
     end
-  end
-  
-  -- Use compressed body if available, otherwise uncompressed
-  if use_compression and compressed_body then
-    body = compressed_body
-    headers["Content-Encoding"] = "br"
-    log.debug(string.format("Compressed request body: %d -> %d bytes", #vim.json.encode(payload), #body))
   else
-    log.debug("Sending uncompressed request (brotli not available)")
+    log.debug("Brotli not available, sending uncompressed")
   end
 
   local request_id = transport.request({

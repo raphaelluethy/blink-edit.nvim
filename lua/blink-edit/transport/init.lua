@@ -57,7 +57,7 @@ end
 --- Make an HTTP request using the appropriate transport
 ---@param opts { url: string, method?: string, headers?: table<string, string>, body?: string, timeout?: number }
 ---@param callback fun(err: { type: string, message: string }|nil, response: { status: number, headers: table, body: string }|nil)
----@return number request_id for cancellation
+---@return table|number|nil job handle or request_id for cancellation
 function M.request(opts, callback)
   local transport_type = select_transport(opts.url)
   local transport = get_transport_module(transport_type)
@@ -71,11 +71,16 @@ function M.request(opts, callback)
   return transport.request(opts, callback)
 end
 
---- Cancel an active request by ID (TCP only)
----@param request_id number
----@return boolean cancelled
-function M.cancel(request_id)
-  return tcp.cancel(request_id)
+--- Cancel an active request
+---@param job table|number|nil job handle or request_id
+function M.cancel(job)
+  if type(job) == "table" and job.kill then
+    -- vim.system job handle (curl)
+    pcall(function() job:kill(9) end)
+  elseif type(job) == "number" and job > 0 then
+    -- TCP request_id
+    tcp.cancel(job)
+  end
 end
 
 --- Close all pooled connections
