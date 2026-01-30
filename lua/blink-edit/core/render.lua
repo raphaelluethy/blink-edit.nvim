@@ -6,6 +6,7 @@ local M = {}
 
 local state = require("blink-edit.core.state")
 local diff = require("blink-edit.core.diff")
+local config = require("blink-edit.config")
 local utils = require("blink-edit.utils")
 local log = require("blink-edit.log")
 
@@ -123,6 +124,44 @@ local function create_overlay_window(parent_win, buffer_line, col, content, synt
   end
 
   return overlay_win, overlay_buf
+end
+
+--- Create a hover preview window near the cursor
+---@param parent_win number
+---@param content string|string[]
+---@param syntax_ft string|nil
+---@return number preview_win, number preview_buf
+local function create_hover_window(parent_win, content, syntax_ft)
+  local preview_buf = vim.api.nvim_create_buf(false, true)
+  local content_lines = type(content) == "table" and content or { content }
+
+  vim.api.nvim_buf_set_lines(preview_buf, 0, -1, false, content_lines)
+  if syntax_ft and syntax_ft ~= "" then
+    vim.api.nvim_set_option_value("filetype", syntax_ft, { buf = preview_buf })
+  end
+  vim.api.nvim_set_option_value("modifiable", false, { buf = preview_buf })
+
+  local max_width = 0
+  for _, line_content in ipairs(content_lines) do
+    max_width = math.max(max_width, vim.fn.strdisplaywidth(line_content))
+  end
+
+  local preview_win = vim.api.nvim_open_win(preview_buf, false, {
+    relative = "cursor",
+    row = 1,
+    col = 0,
+    width = math.max(1, max_width),
+    height = #content_lines,
+    style = "minimal",
+    border = "rounded",
+    zindex = 50,
+    focusable = false,
+  })
+
+  vim.api.nvim_set_option_value("winblend", 0, { win = preview_win })
+  vim.api.nvim_set_option_value("winhighlight", "Normal:NormalFloat,FloatBorder:FloatBorder", { win = preview_win })
+
+  return preview_win, preview_buf
 end
 
 --- Track overlay window for cleanup
@@ -265,6 +304,39 @@ local function show_modification(bufnr, hunk, window_start, extmark_list)
       end
     end
   end
+end
+
+--- Render a single-line insertion inline at the cursor
+---@param bufnr number
+---@param hunk DiffHunk
+---@param cursor table|nil
+---@param extmark_list number[]
+local function show_inline_insertion(bufnr, hunk, cursor, extmark_list)
+  if not cursor or hunk.count_new ~= 1 then
+    return false
+  end
+
+  local line_0 = cursor[1] - 1
+  if line_0 < 0 then
+    return false
+  end
+
+  local ok, line_data = pcall(vim.api.nvim_buf_get_lines, bufnr, line_0, line_0 + 1, false)
+  local current_line = (ok and line_data[1]) or ""
+  local col = math.min(cursor[2] or #current_line, #current_line)
+
+  local text = hunk.new_lines[1] or ""
+  if text == "" then
+    return false
+  end
+
+  local mark_id = vim.api.nvim_buf_set_extmark(bufnr, ns, line_0, col, {
+    virt_text = { { text, "BlinkEditPreview" } },
+    virt_text_pos = "overlay",
+    hl_mode = "combine",
+  })
+  table.insert(extmark_list, mark_id)
+  return true
 end
 
 --- Show a replacement hunk with [replace] markers and overlay window for new content
@@ -439,6 +511,8 @@ function M.show(bufnr, prediction)
   local shown_count = 0
   local skipped_count = 0
   local first_hunk = nil
+  local cfg = config.get()
+  local hover_shown = false
 
   local current_win = vim.api.nvim_get_current_win()
 
@@ -450,13 +524,37 @@ function M.show(bufnr, prediction)
         first_hunk = hunk
       end
       if hunk.type == "insertion" then
-        show_insertion(bufnr, hunk, window_start, current_win, extmarks[bufnr])
+        local handled = false
+        if cfg.mode == "completion" then
+          if hunk.count_new == 1 and cursor and hunk.start_old == cursor_offset then
+            handled = show_inline_insertion(bufnr, hunk, cursor, extmarks[bufnr])
+          elseif hunk.count_new > 1 and not hover_shown then
+            local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
+            local preview_win, preview_buf = create_hover_window(current_win, hunk.new_lines, syntax_ft)
+            track_overlay_window(bufnr, preview_win, preview_buf)
+            hover_shown = true
+            handled = true
+          end
+        end
+        if not handled then
+          show_insertion(bufnr, hunk, window_start, current_win, extmarks[bufnr])
+        end
       elseif hunk.type == "deletion" then
         show_deletion(bufnr, hunk, window_start, extmarks[bufnr])
       elseif hunk.type == "modification" then
         show_modification(bufnr, hunk, window_start, extmarks[bufnr])
       elseif hunk.type == "replacement" then
-        show_replacement(bufnr, hunk, window_start, current_win, extmarks[bufnr])
+        local handled = false
+        if cfg.mode == "completion" and (hunk.count_new > 1 or hunk.count_old > 1) and not hover_shown then
+          local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
+          local preview_win, preview_buf = create_hover_window(current_win, hunk.new_lines, syntax_ft)
+          track_overlay_window(bufnr, preview_win, preview_buf)
+          hover_shown = true
+          handled = true
+        end
+        if not handled then
+          show_replacement(bufnr, hunk, window_start, current_win, extmarks[bufnr])
+        end
       end
     else
       skipped_count = skipped_count + 1
@@ -479,13 +577,37 @@ function M.show(bufnr, prediction)
       log.debug("Render fallback: showing first hunk above cursor")
     end
     if fallback.type == "insertion" then
-      show_insertion(bufnr, fallback, window_start, current_win, extmarks[bufnr])
+      local handled = false
+      if cfg.mode == "completion" then
+        if fallback.count_new == 1 and cursor and fallback.start_old == cursor_offset then
+          handled = show_inline_insertion(bufnr, fallback, cursor, extmarks[bufnr])
+        elseif fallback.count_new > 1 and not hover_shown then
+          local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
+          local preview_win, preview_buf = create_hover_window(current_win, fallback.new_lines, syntax_ft)
+          track_overlay_window(bufnr, preview_win, preview_buf)
+          hover_shown = true
+          handled = true
+        end
+      end
+      if not handled then
+        show_insertion(bufnr, fallback, window_start, current_win, extmarks[bufnr])
+      end
     elseif fallback.type == "deletion" then
       show_deletion(bufnr, fallback, window_start, extmarks[bufnr])
     elseif fallback.type == "modification" then
       show_modification(bufnr, fallback, window_start, extmarks[bufnr])
     elseif fallback.type == "replacement" then
-      show_replacement(bufnr, fallback, window_start, current_win, extmarks[bufnr])
+      local handled = false
+      if cfg.mode == "completion" and (fallback.count_new > 1 or fallback.count_old > 1) and not hover_shown then
+        local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
+        local preview_win, preview_buf = create_hover_window(current_win, fallback.new_lines, syntax_ft)
+        track_overlay_window(bufnr, preview_win, preview_buf)
+        hover_shown = true
+        handled = true
+      end
+      if not handled then
+        show_replacement(bufnr, fallback, window_start, current_win, extmarks[bufnr])
+      end
     end
     first_hunk = fallback
   end
