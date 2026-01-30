@@ -80,6 +80,7 @@
 ---@field fallback_to_direct boolean
 ---@field prefetch BlinkEditPrefetchConfig
 ---@field normal_mode BlinkEditNormalModeConfig
+---@field logging BlinkEditLoggingConfig
 
 ---@class BlinkEditPrefetchConfig
 ---@field enabled boolean
@@ -87,6 +88,10 @@
 
 ---@class BlinkEditNormalModeConfig
 ---@field enabled boolean
+
+---@class BlinkEditLoggingConfig
+---@field level string "debug" | "info" | "warn" | "error" | "off"
+---@field max_entries number Maximum log entries to keep in memory
 
 local M = {}
 
@@ -238,6 +243,14 @@ local defaults = {
   ui = {
     progress = true, -- Show "thinking..." indicator when in-flight
     suppress_lsp_floats = true, -- Hide LSP float dialogs while predictions are visible
+  },
+
+  ---------------------------------------------------------
+  -- Logging
+  ---------------------------------------------------------
+  logging = {
+    level = "info", -- "debug" | "info" | "warn" | "error" | "off"
+    max_entries = 100, -- Max log entries to keep in memory
   },
 
   ---------------------------------------------------------
