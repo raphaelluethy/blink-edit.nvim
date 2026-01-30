@@ -91,16 +91,7 @@ function M.debug(msg, level)
   local log_level = level or vim.log.levels.DEBUG
   -- Always store debug logs (for viewing later with :BlinkEditShowLogs)
   store_log(msg, log_level)
-
-  -- Show if vim.g.blink_edit_debug is set OR if configured level allows it
-  if vim.g.blink_edit_debug or should_log(log_level) then
-    vim.schedule(function()
-      vim.notify("[blink-edit] " .. msg, log_level)
-      if vim.g.blink_edit_debug then
-        pcall(vim.api.nvim_echo, { { "[blink-edit] " .. msg } }, true, {})
-      end
-    end)
-  end
+  -- Debug logs are silent - view with :BlinkEditShowLogs
 end
 
 ---@param msg string

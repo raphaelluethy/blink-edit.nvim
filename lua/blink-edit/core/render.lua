@@ -274,26 +274,64 @@ end
 ---@param bufnr number
 ---@param hunk DiffHunk
 ---@param window_start number 1-indexed
+---@param cursor table|nil [row, col] where row is 1-indexed, col is 0-indexed
 ---@param extmark_list number[] List to append extmark IDs to
-local function show_modification(bufnr, hunk, window_start, extmark_list)
+---@return boolean at_cursor Whether any modification was shown at cursor position
+local function show_modification(bufnr, hunk, window_start, cursor, extmark_list)
   local line_count = vim.api.nvim_buf_line_count(bufnr)
 
   if not hunk.line_changes then
-    return
+    return false
   end
 
+  local at_cursor = false
+  local cursor_row = cursor and cursor[1] or nil -- 1-indexed
+  local cursor_col = cursor and cursor[2] or nil -- 0-indexed byte column
+
   for _, lc in ipairs(hunk.line_changes) do
-    local lnum = window_start + hunk.start_old + lc.index - 2 -- 0-indexed
+    local lnum = window_start + hunk.start_old + lc.index - 2 -- 0-indexed buffer line
     if lnum >= 0 and lnum < line_count then
       local change = lc.change
 
-      -- Get current line length to ensure col is valid
+      -- Get current line
       local ok, line_data = pcall(vim.api.nvim_buf_get_lines, bufnr, lnum, lnum + 1, false)
       local current_line = (ok and line_data[1]) or ""
-      local col = math.min(change.col, #current_line)
+
+      -- Determine column position for the extmark
+      local col = change.col
+      local display_text = change.text
+
+      -- Check if this modification is on the cursor line
+      if cursor_row and lnum == cursor_row - 1 then
+        at_cursor = true
+        -- For cursor-line modifications, use cursor column and extract suffix
+        if cursor_col then
+          -- Get text before cursor (what user has typed)
+          local before_cursor = current_line:sub(1, cursor_col)
+          -- The new line content from the prediction
+          local new_line = hunk.new_lines and hunk.new_lines[lc.index] or (current_line:sub(1, change.col) .. change.text)
+
+          -- Find what suffix to show after cursor
+          if new_line:sub(1, #before_cursor) == before_cursor then
+            -- Prediction agrees with what's before cursor - show continuation
+            display_text = new_line:sub(cursor_col + 1)
+            col = cursor_col
+          elseif cursor_col >= #current_line then
+            -- Cursor at EOL - show the change text as suffix
+            col = cursor_col
+          end
+        end
+      end
+
+      -- Clamp column to line length
+      col = math.min(col, #current_line)
+
+      if display_text == "" then
+        goto continue
+      end
 
       local mark_id = vim.api.nvim_buf_set_extmark(bufnr, ns, lnum, col, {
-        virt_text = { { change.text, "BlinkEditPreview" } },
+        virt_text = { { display_text, "BlinkEditPreview" } },
         virt_text_pos = "inline",
         hl_mode = "combine",
         priority = 200,
@@ -301,10 +339,14 @@ local function show_modification(bufnr, hunk, window_start, extmark_list)
       table.insert(extmark_list, mark_id)
 
       if vim.g.blink_edit_debug and vim.g.blink_edit_debug >= 2 then
-        log.debug2(string.format("Modification: %s at line %d col %d: %q", change.type, lnum + 1, col, change.text))
+        log.debug2(string.format("Modification: %s at line %d col %d: %q", change.type, lnum + 1, col, display_text))
       end
+
+      ::continue::
     end
   end
+
+  return at_cursor
 end
 
 --- Check if completion menu (pum) is visible
@@ -644,7 +686,10 @@ function M.show(bufnr, prediction)
       elseif hunk.type == "deletion" then
         show_deletion(bufnr, hunk, window_start, extmarks[bufnr])
       elseif hunk.type == "modification" then
-        show_modification(bufnr, hunk, window_start, extmarks[bufnr])
+        local mod_at_cursor = show_modification(bufnr, hunk, window_start, cursor, extmarks[bufnr])
+        if mod_at_cursor then
+          inline_at_cursor = true
+        end
       elseif hunk.type == "replacement" then
         -- If we've already shown a hover for any replacement, suppress additional markers
         if hover_shown then
@@ -714,7 +759,10 @@ function M.show(bufnr, prediction)
     elseif fallback.type == "deletion" then
       show_deletion(bufnr, fallback, window_start, extmarks[bufnr])
     elseif fallback.type == "modification" then
-      show_modification(bufnr, fallback, window_start, extmarks[bufnr])
+      local mod_at_cursor = show_modification(bufnr, fallback, window_start, cursor, extmarks[bufnr])
+      if mod_at_cursor then
+        inline_at_cursor = true
+      end
     elseif fallback.type == "replacement" then
       -- If we've already shown a hover, suppress additional markers
       if hover_shown then
