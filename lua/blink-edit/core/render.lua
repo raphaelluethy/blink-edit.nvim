@@ -294,8 +294,9 @@ local function show_modification(bufnr, hunk, window_start, extmark_list)
 
       local mark_id = vim.api.nvim_buf_set_extmark(bufnr, ns, lnum, col, {
         virt_text = { { change.text, "BlinkEditPreview" } },
-        virt_text_pos = "overlay",
+        virt_text_pos = "inline",
         hl_mode = "combine",
+        priority = 200,
       })
       table.insert(extmark_list, mark_id)
 
@@ -312,7 +313,7 @@ local function is_completion_menu_visible()
   return vim.fn.pumvisible() == 1
 end
 
---- Render a single-line insertion inline at the cursor (Copilot-style suffix only)
+--- Render a single-line insertion as inline suffix ghost text at the cursor (Copilot-style)
 ---@param bufnr number
 ---@param hunk DiffHunk
 ---@param cursor table|nil
@@ -321,53 +322,64 @@ end
 ---@param extmark_list number[]
 ---@return boolean success
 local function show_inline_insertion(bufnr, hunk, cursor, window_start, current_win, extmark_list)
-  if not cursor or hunk.count_new ~= 1 then
+  if not cursor or not hunk or not hunk.new_lines or not hunk.new_lines[1] then
     return false
   end
 
-  local line_0 = cursor[1] - 1
+  if is_completion_menu_visible() then
+    return false
+  end
+
+  local row = cursor[1] -- 1-indexed
+  local col = cursor[2] -- 0-indexed byte column
+  local line_0 = row - 1
+
   if line_0 < 0 then
     return false
   end
 
-  -- Check if this insertion is at or right after the cursor line
-  local cursor_offset = cursor[1] - window_start + 1
-  local at_or_after_cursor_line = (hunk.start_old == cursor_offset or hunk.start_old == cursor_offset + 1)
-
-  if not at_or_after_cursor_line or is_completion_menu_visible() then
+  local suggested = hunk.new_lines[1]
+  if suggested == "" then
     return false
   end
 
+  -- Get current buffer line
   local ok, line_data = pcall(vim.api.nvim_buf_get_lines, bufnr, line_0, line_0 + 1, false)
   local current_line = (ok and line_data[1]) or ""
-  local cursor_col = math.min(cursor[2] or #current_line, #current_line)
 
-  local predicted_line = hunk.new_lines[1] or ""
-  if predicted_line == "" then
+  -- Get text from start of line to cursor position (byte-safe)
+  local before_cursor_ok, before_cursor_data = pcall(vim.api.nvim_buf_get_text, bufnr, line_0, 0, line_0, col, {})
+  local before_cursor = (before_cursor_ok and before_cursor_data[1]) or ""
+
+  local suffix
+
+  -- Check if suggestion agrees with what's before cursor
+  if suggested:sub(1, #before_cursor) == before_cursor then
+    -- Suggestion starts with what user typed - extract the continuation
+    suffix = suggested:sub(#before_cursor + 1)
+  elseif col == #current_line then
+    -- Cursor at EOL and suggestion doesn't match prefix - treat suggestion as the suffix fragment
+    suffix = suggested
+  else
+    -- Can't render inline
     return false
   end
 
-  -- Copilot-like: only show what continues from the cursor position
-  local prefix = current_line:sub(1, cursor_col)
-  if predicted_line:sub(1, #prefix) ~= prefix then
-    -- Not a same-line continuation; don't fake it
-    return false
-  end
-
-  local suffix = predicted_line:sub(#prefix + 1)
   if suffix == "" then
     return false
   end
 
-  local mark_id = vim.api.nvim_buf_set_extmark(bufnr, ns, line_0, cursor_col, {
+  -- Use virt_text_pos = "inline" to insert text at cursor and shift existing text right
+  local mark_id = vim.api.nvim_buf_set_extmark(bufnr, ns, line_0, col, {
     virt_text = { { suffix, "BlinkEditPreview" } },
-    virt_text_pos = "overlay",
+    virt_text_pos = "inline",
     hl_mode = "combine",
+    priority = 200,
   })
   table.insert(extmark_list, mark_id)
 
   if vim.g.blink_edit_debug and vim.g.blink_edit_debug >= 2 then
-    log.debug2(string.format("Inline insertion: suffix %q at line %d col %d", suffix, line_0 + 1, cursor_col))
+    log.debug2(string.format("Inline insertion: suffix %q at line %d col %d", suffix, line_0 + 1, col))
   end
 
   return true
@@ -627,19 +639,19 @@ function M.show(bufnr, prediction)
       elseif hunk.type == "modification" then
         show_modification(bufnr, hunk, window_start, extmarks[bufnr])
       elseif hunk.type == "replacement" then
-        local handled = false
-        -- Always use hover window for replacements with unified diff
-        if not hover_shown then
+        -- If we've already shown a hover for any replacement, suppress additional markers
+        if hover_shown then
+          -- Skip - hover already visible for a previous replacement
+        else
           local diff_lines = replacement_diff_lines(hunk)
           local ok, preview_win, preview_buf = pcall(create_hover_window, current_win, diff_lines, "diff")
           if ok and preview_win then
             track_overlay_window(bufnr, preview_win, preview_buf)
             hover_shown = true
-            handled = true
+          else
+            -- Only show [replace] markers if hover creation failed
+            show_replacement(bufnr, hunk, window_start, current_win, extmarks[bufnr])
           end
-        end
-        if not handled then
-          show_replacement(bufnr, hunk, window_start, current_win, extmarks[bufnr])
         end
       end
     else
@@ -696,19 +708,18 @@ function M.show(bufnr, prediction)
     elseif fallback.type == "modification" then
       show_modification(bufnr, fallback, window_start, extmarks[bufnr])
     elseif fallback.type == "replacement" then
-      local handled = false
-      -- Always use hover window for replacements with unified diff
-      if not hover_shown then
+      -- If we've already shown a hover, suppress additional markers
+      if hover_shown then
+        -- Skip - hover already visible
+      else
         local diff_lines = replacement_diff_lines(fallback)
         local ok, preview_win, preview_buf = pcall(create_hover_window, current_win, diff_lines, "diff")
         if ok and preview_win then
           track_overlay_window(bufnr, preview_win, preview_buf)
           hover_shown = true
-          handled = true
+        else
+          show_replacement(bufnr, fallback, window_start, current_win, extmarks[bufnr])
         end
-      end
-      if not handled then
-        show_replacement(bufnr, fallback, window_start, current_win, extmarks[bufnr])
       end
     end
     first_hunk = fallback
