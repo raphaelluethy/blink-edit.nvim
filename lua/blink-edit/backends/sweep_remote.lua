@@ -325,6 +325,7 @@ function M.complete(opts, callback)
     ["Content-Type"] = "application/json",
     ["Authorization"] = "Bearer " .. token,
     ["Connection"] = "keep-alive",
+    ["Accept-Encoding"] = "br, gzip, deflate",
   }
 
   -- Try to compress with brotli using FFI (fast, no IO)
@@ -356,10 +357,13 @@ function M.complete(opts, callback)
     -- Check HTTP status code first
     local status = response.status or 0
     
+    -- Debug: log all responses for now
+    log.debug(string.format("Sweep HTTP status: %d", status))
+    log.debug(string.format("Sweep response headers: %s", vim.inspect(response.headers)))
+    
     -- Debug: log full response on error
     if status >= 400 then
       log.debug(string.format("Sweep HTTP error %d - Response body: %s", status, vim.inspect(response.body)))
-      log.debug(string.format("Sweep HTTP error %d - Response headers: %s", status, vim.inspect(response.headers)))
     end
     
     if status == 401 or status == 403 then
@@ -386,6 +390,15 @@ function M.complete(opts, callback)
 
     -- Parse response
     local body = response.body
+    
+    -- Debug: log raw response
+    log.debug(string.format("Sweep response status: %d", response.status or 0))
+    log.debug(string.format("Sweep response body type: %s", type(body)))
+    log.debug(string.format("Sweep response body length: %d", type(body) == "string" and #body or 0))
+    if type(body) == "string" and #body > 0 then
+      log.debug(string.format("Sweep response body preview: %s", body:sub(1, 200)))
+    end
+    
     if type(body) == "string" then
       local ok, decoded = pcall(vim.json.decode, body)
       if not ok then

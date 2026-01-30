@@ -20,6 +20,7 @@ function M.request(opts, callback)
   local args = {
     "-s", -- Silent mode
     "-S", -- Show errors
+    "--compressed", -- Automatically decompress responses (brotli, gzip, etc.)
     "-X", method,
     "--max-time", tostring(timeout / 1000),
     "-w", "\n%{http_code}", -- Append status code
@@ -72,6 +73,8 @@ function M.request(opts, callback)
 
       -- Parse response
       local raw_output = result.stdout or ""
+      log.debug(string.format("curl raw output length: %d", #raw_output))
+      
       local output_lines = vim.split(raw_output, "\n")
 
       -- Find status code (last numeric line)
@@ -84,6 +87,8 @@ function M.request(opts, callback)
           break
         end
       end
+      
+      log.debug(string.format("curl status code: %s", tostring(status_code)))
 
       -- Parse headers and body
       local headers = {}
@@ -103,6 +108,8 @@ function M.request(opts, callback)
           end
         end
       end
+      
+      log.debug(string.format("curl body starts at line: %d of %d", body_start, #output_lines))
 
       -- Extract body
       local body_lines = {}
@@ -110,6 +117,7 @@ function M.request(opts, callback)
         table.insert(body_lines, output_lines[i])
       end
       local response_body = table.concat(body_lines, "\n")
+      log.debug(string.format("curl response body length: %d", #response_body))
 
       -- Parse JSON if applicable
       local json_body = nil
