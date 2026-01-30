@@ -555,8 +555,18 @@ function M.show(bufnr, prediction)
         local handled = false
         if cfg.mode == "completion" then
           if hunk.count_new == 1 and cursor and hunk.start_old == cursor_offset then
+            -- Try inline first, if that fails (completion menu visible), use hover
             handled = show_inline_insertion(bufnr, hunk, cursor, window_start, current_win, extmarks[bufnr])
-          elseif hunk.count_new > 1 and not hover_shown then
+            if not handled and not hover_shown then
+              -- Single line at cursor but completion visible - use hover
+              local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
+              local preview_win, preview_buf = create_hover_window(current_win, hunk.new_lines, syntax_ft)
+              track_overlay_window(bufnr, preview_win, preview_buf)
+              hover_shown = true
+              handled = true
+            end
+          elseif hunk.count_new >= 1 and not hover_shown then
+            -- Multi-line insertions or insertions not at cursor - use hover
             local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
             local preview_win, preview_buf = create_hover_window(current_win, hunk.new_lines, syntax_ft)
             track_overlay_window(bufnr, preview_win, preview_buf)
@@ -573,7 +583,8 @@ function M.show(bufnr, prediction)
         show_modification(bufnr, hunk, window_start, extmarks[bufnr])
       elseif hunk.type == "replacement" then
         local handled = false
-        if cfg.mode == "completion" and (hunk.count_new > 1 or hunk.count_old > 1) and not hover_shown then
+        -- Always use hover window for replacements when completion menu might be visible
+        if cfg.mode == "completion" and not hover_shown then
           local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
           local preview_win, preview_buf = create_hover_window(current_win, hunk.new_lines, syntax_ft)
           track_overlay_window(bufnr, preview_win, preview_buf)
@@ -608,8 +619,18 @@ function M.show(bufnr, prediction)
       local handled = false
       if cfg.mode == "completion" then
         if fallback.count_new == 1 and cursor and fallback.start_old == cursor_offset then
+          -- Try inline first, if that fails (completion menu visible), use hover
           handled = show_inline_insertion(bufnr, fallback, cursor, window_start, current_win, extmarks[bufnr])
-        elseif fallback.count_new > 1 and not hover_shown then
+          if not handled and not hover_shown then
+            -- Single line at cursor but completion visible - use hover
+            local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
+            local preview_win, preview_buf = create_hover_window(current_win, fallback.new_lines, syntax_ft)
+            track_overlay_window(bufnr, preview_win, preview_buf)
+            hover_shown = true
+            handled = true
+          end
+        elseif fallback.count_new >= 1 and not hover_shown then
+          -- Multi-line insertions or insertions not at cursor - use hover
           local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
           local preview_win, preview_buf = create_hover_window(current_win, fallback.new_lines, syntax_ft)
           track_overlay_window(bufnr, preview_win, preview_buf)
@@ -626,7 +647,8 @@ function M.show(bufnr, prediction)
       show_modification(bufnr, fallback, window_start, extmarks[bufnr])
     elseif fallback.type == "replacement" then
       local handled = false
-      if cfg.mode == "completion" and (fallback.count_new > 1 or fallback.count_old > 1) and not hover_shown then
+      -- Always use hover window for replacements when completion menu might be visible
+      if cfg.mode == "completion" and not hover_shown then
         local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
         local preview_win, preview_buf = create_hover_window(current_win, fallback.new_lines, syntax_ft)
         track_overlay_window(bufnr, preview_win, preview_buf)
