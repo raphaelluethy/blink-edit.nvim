@@ -15,19 +15,160 @@ local ns = vim.api.nvim_create_namespace("blink-edit")
 ---@type table<number, number[]> Buffer -> list of extmark IDs
 local extmarks = {}
 
+---@type table<number, { win_id: number, buf_id: number }[]> Buffer -> overlay windows
+local overlay_windows = {}
+
 local JUMP_TEXT = " ⇥ TAB "
+
+-- =============================================================================
+-- Overlay Window Helpers (adapted from cursortab.nvim)
+-- =============================================================================
+
+--- Get the editor column offset (signs, number col, etc.)
+---@param win number
+---@return number
+local function get_editor_col_offset(win)
+  local wininfo = vim.fn.getwininfo(win)
+  if #wininfo > 0 then
+    return wininfo[1].textoff or 0
+  end
+  return 0
+end
+
+--- Trim a string by a given number of display columns from the left
+---@param text string
+---@param display_cols number
+---@return string trimmed_text
+local function trim_left_display_cols(text, display_cols)
+  if not text or text == "" or display_cols <= 0 then
+    return text
+  end
+
+  local total_chars = vim.fn.strchars(text)
+  local trimmed_chars = 0
+  local accumulated_width = 0
+
+  while trimmed_chars < total_chars and accumulated_width < display_cols do
+    local ch = vim.fn.strcharpart(text, trimmed_chars, 1)
+    local ch_width = vim.fn.strdisplaywidth(ch)
+    accumulated_width = accumulated_width + ch_width
+    trimmed_chars = trimmed_chars + 1
+  end
+
+  return vim.fn.strcharpart(text, trimmed_chars)
+end
+
+--- Create transparent overlay window for completion content
+---@param parent_win number
+---@param buffer_line number 0-indexed buffer line
+---@param col number 0-indexed column
+---@param content string|string[]
+---@param syntax_ft string|nil
+---@param winhl string|nil
+---@param min_width number|nil
+---@return number overlay_win, number overlay_buf
+local function create_overlay_window(parent_win, buffer_line, col, content, syntax_ft, winhl, min_width)
+  local overlay_buf = vim.api.nvim_create_buf(false, true)
+  local content_lines = type(content) == "table" and content or { content }
+
+  local leftcol = vim.api.nvim_win_call(parent_win, function()
+    local view = vim.fn.winsaveview()
+    return view.leftcol or 0
+  end)
+
+  local trim_cols = math.max(0, leftcol - col)
+  if trim_cols > 0 then
+    for i, line_content in ipairs(content_lines) do
+      content_lines[i] = trim_left_display_cols(line_content or "", trim_cols)
+    end
+  end
+
+  vim.api.nvim_buf_set_lines(overlay_buf, 0, -1, false, content_lines)
+  if syntax_ft and syntax_ft ~= "" then
+    vim.api.nvim_set_option_value("filetype", syntax_ft, { buf = overlay_buf })
+  end
+  vim.api.nvim_set_option_value("modifiable", false, { buf = overlay_buf })
+
+  local max_width = 0
+  for _, line_content in ipairs(content_lines) do
+    max_width = math.max(max_width, vim.fn.strdisplaywidth(line_content))
+  end
+  if min_width and min_width > max_width then
+    local adjusted_min_width = math.max(0, min_width - trim_cols)
+    max_width = math.max(max_width, adjusted_min_width)
+  end
+
+  local left_offset = get_editor_col_offset(parent_win)
+  local first_visible_line = vim.api.nvim_win_call(parent_win, function()
+    return vim.fn.line("w0")
+  end)
+  local window_relative_line = buffer_line - (first_visible_line - 1)
+
+  local overlay_win = vim.api.nvim_open_win(overlay_buf, false, {
+    relative = "win",
+    win = parent_win,
+    row = window_relative_line,
+    col = left_offset + math.max(0, col - leftcol),
+    width = math.max(1, max_width),
+    height = #content_lines,
+    style = "minimal",
+    zindex = 1,
+    focusable = false,
+    fixed = true,
+  })
+
+  vim.api.nvim_set_option_value("winblend", 0, { win = overlay_win })
+  if winhl and winhl ~= "" then
+    vim.api.nvim_set_option_value("winhighlight", "Normal:" .. winhl, { win = overlay_win })
+  end
+
+  return overlay_win, overlay_buf
+end
+
+--- Track overlay window for cleanup
+---@param bufnr number
+---@param win_id number
+---@param buf_id number
+local function track_overlay_window(bufnr, win_id, buf_id)
+  overlay_windows[bufnr] = overlay_windows[bufnr] or {}
+  table.insert(overlay_windows[bufnr], { win_id = win_id, buf_id = buf_id })
+end
+
+--- Close and cleanup overlay windows for a buffer
+---@param bufnr number
+local function clear_overlay_windows(bufnr)
+  local windows = overlay_windows[bufnr]
+  if not windows then
+    return
+  end
+
+  for _, info in ipairs(windows) do
+    if info.win_id and vim.api.nvim_win_is_valid(info.win_id) then
+      pcall(vim.api.nvim_win_close, info.win_id, true)
+    end
+    if info.buf_id and vim.api.nvim_buf_is_valid(info.buf_id) then
+      pcall(vim.api.nvim_buf_delete, info.buf_id, { force = true })
+    end
+  end
+
+  overlay_windows[bufnr] = nil
+end
 
 -- =============================================================================
 -- Display Functions (one per hunk type)
 -- =============================================================================
 
---- Show an insertion hunk as virt_lines below the anchor line
+--- Show an insertion hunk as virtual lines with overlay window
 ---@param bufnr number
 ---@param hunk DiffHunk
 ---@param window_start number 1-indexed
+---@param current_win number
 ---@param extmark_list number[] List to append extmark IDs to
-local function show_insertion(bufnr, hunk, window_start, extmark_list)
+local function show_insertion(bufnr, hunk, window_start, current_win, extmark_list)
   local line_count = vim.api.nvim_buf_line_count(bufnr)
+  if line_count == 0 then
+    return
+  end
 
   -- Anchor line: after line start_old in the window
   -- For insertion at start_old=0, anchor at line 0 (first line)
@@ -42,10 +183,10 @@ local function show_insertion(bufnr, hunk, window_start, extmark_list)
     anchor_line_0 = line_count - 1
   end
 
-  -- Build virt_lines
+  -- Build empty virt_lines (overlay renders actual content)
   local virt_lines = {}
-  for _, line in ipairs(hunk.new_lines) do
-    table.insert(virt_lines, { { line, "BlinkEditPreview" } })
+  for _ = 1, #hunk.new_lines do
+    table.insert(virt_lines, { { "", "Normal" } })
   end
 
   local mark_id = vim.api.nvim_buf_set_extmark(bufnr, ns, anchor_line_0, 0, {
@@ -53,6 +194,11 @@ local function show_insertion(bufnr, hunk, window_start, extmark_list)
     virt_lines_above = false, -- Show below anchor line
   })
   table.insert(extmark_list, mark_id)
+
+  local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
+  local overlay_line_0 = anchor_line_0 + 1
+  local overlay_win, overlay_buf = create_overlay_window(current_win, overlay_line_0, 0, hunk.new_lines, syntax_ft, nil, nil)
+  track_overlay_window(bufnr, overlay_win, overlay_buf)
 
   if vim.g.blink_edit_debug and vim.g.blink_edit_debug >= 2 then
     log.debug2(string.format("Insertion: %d lines after buffer line %d", #hunk.new_lines, anchor_line))
@@ -121,12 +267,13 @@ local function show_modification(bufnr, hunk, window_start, extmark_list)
   end
 end
 
---- Show a replacement hunk with [replace] markers and virt_lines for new content
+--- Show a replacement hunk with [replace] markers and overlay window for new content
 ---@param bufnr number
 ---@param hunk DiffHunk
 ---@param window_start number 1-indexed
+---@param current_win number
 ---@param extmark_list number[] List to append extmark IDs to
-local function show_replacement(bufnr, hunk, window_start, extmark_list)
+local function show_replacement(bufnr, hunk, window_start, current_win, extmark_list)
   local line_count = vim.api.nvim_buf_line_count(bufnr)
 
   -- Mark old lines with [replace]
@@ -141,9 +288,8 @@ local function show_replacement(bufnr, hunk, window_start, extmark_list)
     end
   end
 
-  -- Show new content as virt_lines after last old line
+  -- Show new content as overlay below last old line
   if hunk.count_new > 0 then
-    -- Anchor at the last line being replaced
     local anchor_line_0 = window_start + hunk.start_old + hunk.count_old - 2 -- 0-indexed
     if anchor_line_0 < 0 then
       anchor_line_0 = 0
@@ -153,8 +299,8 @@ local function show_replacement(bufnr, hunk, window_start, extmark_list)
     end
 
     local virt_lines = {}
-    for _, line in ipairs(hunk.new_lines) do
-      table.insert(virt_lines, { { line, "BlinkEditPreview" } })
+    for _ = 1, #hunk.new_lines do
+      table.insert(virt_lines, { { "", "Normal" } })
     end
 
     local mark_id = vim.api.nvim_buf_set_extmark(bufnr, ns, anchor_line_0, 0, {
@@ -162,6 +308,11 @@ local function show_replacement(bufnr, hunk, window_start, extmark_list)
       virt_lines_above = false,
     })
     table.insert(extmark_list, mark_id)
+
+    local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
+    local overlay_line_0 = anchor_line_0 + 1
+    local overlay_win, overlay_buf = create_overlay_window(current_win, overlay_line_0, 0, hunk.new_lines, syntax_ft, nil, nil)
+    track_overlay_window(bufnr, overlay_win, overlay_buf)
   end
 
   if vim.g.blink_edit_debug and vim.g.blink_edit_debug >= 2 then
@@ -229,6 +380,7 @@ function M.clear(bufnr)
   -- Clear all extmarks in our namespace
   vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
   extmarks[bufnr] = nil
+  clear_overlay_windows(bufnr)
 
   -- Clear prediction state
   state.clear_prediction(bufnr)
@@ -251,6 +403,7 @@ function M.show(bufnr, prediction)
   -- Clear existing extmarks first
   vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
   extmarks[bufnr] = {}
+  clear_overlay_windows(bufnr)
 
   if not prediction then
     return
@@ -287,6 +440,8 @@ function M.show(bufnr, prediction)
   local skipped_count = 0
   local first_hunk = nil
 
+  local current_win = vim.api.nvim_get_current_win()
+
   for _, hunk in ipairs(diff_result.hunks) do
     -- Only show hunks at or below cursor position
     if hunk.start_old >= cursor_offset then
@@ -295,13 +450,13 @@ function M.show(bufnr, prediction)
         first_hunk = hunk
       end
       if hunk.type == "insertion" then
-        show_insertion(bufnr, hunk, window_start, extmarks[bufnr])
+        show_insertion(bufnr, hunk, window_start, current_win, extmarks[bufnr])
       elseif hunk.type == "deletion" then
         show_deletion(bufnr, hunk, window_start, extmarks[bufnr])
       elseif hunk.type == "modification" then
         show_modification(bufnr, hunk, window_start, extmarks[bufnr])
       elseif hunk.type == "replacement" then
-        show_replacement(bufnr, hunk, window_start, extmarks[bufnr])
+        show_replacement(bufnr, hunk, window_start, current_win, extmarks[bufnr])
       end
     else
       skipped_count = skipped_count + 1
@@ -324,13 +479,13 @@ function M.show(bufnr, prediction)
       log.debug("Render fallback: showing first hunk above cursor")
     end
     if fallback.type == "insertion" then
-      show_insertion(bufnr, fallback, window_start, extmarks[bufnr])
+      show_insertion(bufnr, fallback, window_start, current_win, extmarks[bufnr])
     elseif fallback.type == "deletion" then
       show_deletion(bufnr, fallback, window_start, extmarks[bufnr])
     elseif fallback.type == "modification" then
       show_modification(bufnr, fallback, window_start, extmarks[bufnr])
     elseif fallback.type == "replacement" then
-      show_replacement(bufnr, fallback, window_start, extmarks[bufnr])
+      show_replacement(bufnr, fallback, window_start, current_win, extmarks[bufnr])
     end
     first_hunk = fallback
   end
@@ -462,6 +617,7 @@ local function apply_prediction(bufnr, prediction)
   -- Clear the visual indicators (but don't clear prediction state yet - engine needs it)
   vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
   extmarks[bufnr] = nil
+  clear_overlay_windows(bufnr)
 
   return true, merged
 end
