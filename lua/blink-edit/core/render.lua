@@ -595,7 +595,11 @@ function M.show(bufnr, prediction)
 
   for _, hunk in ipairs(diff_result.hunks) do
     -- Only show hunks at or below cursor position
-    if hunk.start_old >= cursor_offset then
+    -- For insertions, start_old is the line AFTER which content is inserted,
+    -- so start_old = cursor_offset - 1 means insertion AT the cursor line
+    local hunk_at_or_below_cursor = hunk.start_old >= cursor_offset
+      or (hunk.type == "insertion" and hunk.start_old == cursor_offset - 1)
+    if hunk_at_or_below_cursor then
       shown_count = shown_count + 1
       if not first_hunk then
         first_hunk = hunk
@@ -605,9 +609,12 @@ function M.show(bufnr, prediction)
         if cfg.mode == "completion" then
           -- Check if completion menu is visible - if so, use hover window
           local pum_visible = is_completion_menu_visible()
-          local at_or_after_cursor = (hunk.start_old == cursor_offset or hunk.start_old == cursor_offset + 1)
+          -- For insertions, start_old is the line AFTER which content is inserted
+          -- So insertion at start_old=N appears between line N and N+1
+          -- If cursor is on line N or N+1, we can show inline
+          local insertion_at_cursor = (hunk.start_old == cursor_offset or hunk.start_old == cursor_offset - 1)
 
-          if hunk.count_new == 1 and cursor and at_or_after_cursor and not pum_visible then
+          if hunk.count_new == 1 and cursor and insertion_at_cursor and not pum_visible then
             -- Try inline ghost text (Copilot-style suffix)
             handled = show_inline_insertion(bufnr, hunk, cursor, window_start, current_win, extmarks[bufnr])
             if handled then
@@ -679,9 +686,10 @@ function M.show(bufnr, prediction)
       if cfg.mode == "completion" then
         -- Check if completion menu is visible - if so, use hover window
         local pum_visible = is_completion_menu_visible()
-        local at_or_after_cursor = (fallback.start_old == cursor_offset or fallback.start_old == cursor_offset + 1)
+        -- For insertions, start_old is the line AFTER which content is inserted
+        local insertion_at_cursor = (fallback.start_old == cursor_offset or fallback.start_old == cursor_offset - 1)
 
-        if fallback.count_new == 1 and cursor and at_or_after_cursor and not pum_visible then
+        if fallback.count_new == 1 and cursor and insertion_at_cursor and not pum_visible then
           -- Try inline ghost text (Copilot-style suffix)
           handled = show_inline_insertion(bufnr, fallback, cursor, window_start, current_win, extmarks[bufnr])
           if handled then
