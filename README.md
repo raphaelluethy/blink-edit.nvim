@@ -31,7 +31,7 @@
 
 - **Fast:** Written entirely in Lua.
 - **Private:** Bring your own local model (OpenAI-compatible or Ollama).
-- **Simple:** Accept with `<Tab>`, reject with `<Esc>`.
+- **Simple:** Accept with `<Tab>`, reject with `<Ctrl+]>`.
 
 ---
 
@@ -39,9 +39,12 @@
 
 - 👻 **Ghost Text** — Next-edit predictions rendered inline
 - 🎮 **Intuitive Controls** — Accept/reject with standard insert-mode keymaps
+- 🔄 **Animated Spinner** — LSP-style loading indicator while predictions are in-flight
+- 👀 **Diff Preview** — Hover window shows what will change for off-cursor predictions
 - 🏥 **Health Check** — Status popup with live server health monitoring
 - 🔌 **Providers** — Built-in support for **Sweep** and **Zeta** *(more coming soon)*
 - 🤖 **Backends** — Connects to any OpenAI-compatible API or Ollama
+- ⚡ **Non-blocking** — Fully async I/O; typing is never slowed by predictions
 
 ---
 
@@ -109,7 +112,7 @@ require("blink-edit").setup({
 
 3. **Control:**
    - `<Tab>` to **Accept**
-   - `<Esc>` to **Reject**
+   - `<C-]>` to **Reject** (Ctrl+])
    - `:BlinkEditStatus` to check server health
 
 ---
@@ -201,9 +204,14 @@ require("blink-edit").setup({
   },
 
   ui = {
-    progress = true,              -- Show "thinking..." indicator
+    progress = true,              -- Show animated spinner while request in-flight
     suppress_lsp_floats = true,   -- Hide LSP floats while prediction visible
   },
+
+  -- Rate limiting (prevents API spam)
+  debounce_ms = 50,               -- Delay before sending request after typing stops
+  min_request_interval_ms = 200,  -- Minimum time between API requests
+  cooldown_after_response_ms = 100, -- Cooldown after receiving a response
 
   prefetch = {
     enabled = false,              -- Speculative prefetch (uses extra tokens)
@@ -215,7 +223,7 @@ require("blink-edit").setup({
   },
 
   accept_key = "<Tab>",           -- Key to accept prediction
-  reject_key = "<Esc>",           -- Key to reject prediction
+  reject_key = "<C-]>",           -- Key to reject prediction (Ctrl+])
 })
 ```
 
@@ -228,7 +236,7 @@ require("blink-edit").setup({
 | Key | Action |
 |-----|--------|
 | `<Tab>` | **Accept** prediction |
-| `<Esc>` | **Reject** prediction |
+| `<C-]>` | **Reject** prediction |
 
 > **Note:** If you use `blink.cmp` or `nvim-cmp`, the `<Tab>` keymap automatically checks if the completion menu is visible before accepting predictions.
 
@@ -247,6 +255,9 @@ require("blink-edit").setup({
 | `:BlinkEditEnable` | Enable predictions |
 | `:BlinkEditDisable` | Disable predictions |
 | `:BlinkEditToggle` | Toggle predictions on/off |
+| `:BlinkEditShowLogs` | View debug log history in a buffer |
+| `:BlinkEditClearLogs` | Clear the debug log history |
+| `:BlinkEditTestSweep` | Test connection to Sweep AI backend |
 
 ---
 
@@ -279,7 +290,7 @@ require("blink-edit").health_check()  -- Check backend health
 - Current prediction visibility
 - History entry count
 
-Press `r` to refresh health, `q` or `<Esc>` to close.
+Press `r` to refresh health, `q` to close.
 
 ---
 
@@ -336,9 +347,11 @@ We check for blink.cmp/nvim-cmp visibility, but you can change `accept_key` if n
 ## 🐛 Debugging
 
 ```lua
-vim.g.blink_edit_debug = true   -- Summary logs
+vim.g.blink_edit_debug = true   -- Enable debug logging (silent)
 vim.g.blink_edit_debug = 2      -- Verbose (prompts + responses)
 ```
+
+Debug logs are stored silently and can be viewed with `:BlinkEditShowLogs`. This avoids spamming `vim.notify` during normal usage.
 
 ---
 
