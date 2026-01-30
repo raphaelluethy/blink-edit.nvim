@@ -306,22 +306,10 @@ local function show_modification(bufnr, hunk, window_start, extmark_list)
   end
 end
 
---- Cached pumvisible check to avoid lag
----@type boolean|nil
-local cached_pumvisible = nil
----@type number|nil
-local cached_pumvisible_time = nil
-
---- Check if completion menu (pum) is visible (cached for 50ms to prevent lag)
+--- Check if completion menu (pum) is visible
 ---@return boolean
 local function is_completion_menu_visible()
-  local now = vim.loop.now()
-  if cached_pumvisible_time and (now - cached_pumvisible_time) < 50 then
-    return cached_pumvisible
-  end
-  cached_pumvisible = vim.fn.pumvisible() == 1
-  cached_pumvisible_time = now
-  return cached_pumvisible
+  return vim.fn.pumvisible() == 1
 end
 
 --- Render a single-line insertion inline at the cursor or in hover window
@@ -589,10 +577,17 @@ function M.show(bufnr, prediction)
           -- Use hover window for: multi-line, not at cursor, or when completion is visible
           if not handled and not hover_shown then
             local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
-            local preview_win, preview_buf = create_hover_window(current_win, hunk.new_lines, syntax_ft)
-            track_overlay_window(bufnr, preview_win, preview_buf)
-            hover_shown = true
-            handled = true
+            local ok, preview_win, preview_buf = pcall(create_hover_window, current_win, hunk.new_lines, syntax_ft)
+            if ok and preview_win then
+              track_overlay_window(bufnr, preview_win, preview_buf)
+              hover_shown = true
+              handled = true
+              if vim.g.blink_edit_debug then
+                log.debug("Hover window created for insertion")
+              end
+            elseif vim.g.blink_edit_debug then
+              log.debug("Failed to create hover window: " .. tostring(preview_win))
+            end
           end
         end
         if not handled then
@@ -607,10 +602,12 @@ function M.show(bufnr, prediction)
         -- Always use hover window for replacements when completion menu might be visible
         if cfg.mode == "completion" and not hover_shown then
           local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
-          local preview_win, preview_buf = create_hover_window(current_win, hunk.new_lines, syntax_ft)
-          track_overlay_window(bufnr, preview_win, preview_buf)
-          hover_shown = true
-          handled = true
+          local ok, preview_win, preview_buf = pcall(create_hover_window, current_win, hunk.new_lines, syntax_ft)
+          if ok and preview_win then
+            track_overlay_window(bufnr, preview_win, preview_buf)
+            hover_shown = true
+            handled = true
+          end
         end
         if not handled then
           show_replacement(bufnr, hunk, window_start, current_win, extmarks[bufnr])
@@ -653,10 +650,12 @@ function M.show(bufnr, prediction)
         -- Use hover window for: multi-line, not at cursor, or when completion is visible
         if not handled and not hover_shown then
           local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
-          local preview_win, preview_buf = create_hover_window(current_win, fallback.new_lines, syntax_ft)
-          track_overlay_window(bufnr, preview_win, preview_buf)
-          hover_shown = true
-          handled = true
+          local ok, preview_win, preview_buf = pcall(create_hover_window, current_win, fallback.new_lines, syntax_ft)
+          if ok and preview_win then
+            track_overlay_window(bufnr, preview_win, preview_buf)
+            hover_shown = true
+            handled = true
+          end
         end
       end
       if not handled then
@@ -671,10 +670,12 @@ function M.show(bufnr, prediction)
       -- Always use hover window for replacements when completion menu might be visible
       if cfg.mode == "completion" and not hover_shown then
         local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
-        local preview_win, preview_buf = create_hover_window(current_win, fallback.new_lines, syntax_ft)
-        track_overlay_window(bufnr, preview_win, preview_buf)
-        hover_shown = true
-        handled = true
+        local ok, preview_win, preview_buf = pcall(create_hover_window, current_win, fallback.new_lines, syntax_ft)
+        if ok and preview_win then
+          track_overlay_window(bufnr, preview_win, preview_buf)
+          hover_shown = true
+          handled = true
+        end
       end
       if not handled then
         show_replacement(bufnr, fallback, window_start, current_win, extmarks[bufnr])
