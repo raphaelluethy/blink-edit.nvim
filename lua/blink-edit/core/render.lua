@@ -306,12 +306,30 @@ local function show_modification(bufnr, hunk, window_start, extmark_list)
   end
 end
 
---- Render a single-line insertion inline at the cursor
+--- Check if completion menu (pum) is visible
+---@return boolean
+local function is_completion_menu_visible()
+  return vim.fn.pumvisible() == 1
+end
+
+--- Get the cursor screen position
+---@return number row, number col
+local function get_cursor_screen_pos()
+  local pos = vim.api.nvim_win_get_cursor(0)
+  local screen_row = vim.fn.screenrow()
+  local screen_col = vim.fn.screencol()
+  return screen_row, screen_col
+end
+
+--- Render a single-line insertion inline at the cursor or in hover window
 ---@param bufnr number
 ---@param hunk DiffHunk
 ---@param cursor table|nil
+---@param window_start number 1-indexed
+---@param current_win number
 ---@param extmark_list number[]
-local function show_inline_insertion(bufnr, hunk, cursor, extmark_list)
+---@return boolean success
+local function show_inline_insertion(bufnr, hunk, cursor, window_start, current_win, extmark_list)
   if not cursor or hunk.count_new ~= 1 then
     return false
   end
@@ -321,22 +339,32 @@ local function show_inline_insertion(bufnr, hunk, cursor, extmark_list)
     return false
   end
 
-  local ok, line_data = pcall(vim.api.nvim_buf_get_lines, bufnr, line_0, line_0 + 1, false)
-  local current_line = (ok and line_data[1]) or ""
-  local col = math.min(cursor[2] or #current_line, #current_line)
-
   local text = hunk.new_lines[1] or ""
   if text == "" then
     return false
   end
 
-  local mark_id = vim.api.nvim_buf_set_extmark(bufnr, ns, line_0, col, {
-    virt_text = { { text, "BlinkEditPreview" } },
-    virt_text_pos = "overlay",
-    hl_mode = "combine",
-  })
-  table.insert(extmark_list, mark_id)
-  return true
+  -- Check if this insertion is at the cursor position on the current line
+  local cursor_offset = cursor[1] - window_start + 1
+  local is_at_cursor_line = hunk.start_old == cursor_offset
+
+  -- If at cursor line and completion menu is NOT visible, show inline
+  if is_at_cursor_line and not is_completion_menu_visible() then
+    local ok, line_data = pcall(vim.api.nvim_buf_get_lines, bufnr, line_0, line_0 + 1, false)
+    local current_line = (ok and line_data[1]) or ""
+    local col = math.min(cursor[2] or #current_line, #current_line)
+
+    local mark_id = vim.api.nvim_buf_set_extmark(bufnr, ns, line_0, col, {
+      virt_text = { { text, "BlinkEditPreview" } },
+      virt_text_pos = "overlay",
+      hl_mode = "combine",
+    })
+    table.insert(extmark_list, mark_id)
+    return true
+  end
+
+  -- Otherwise, show in hover window to avoid being hidden by completion menu
+  return false
 end
 
 --- Show a replacement hunk with [replace] markers and overlay window for new content
@@ -527,7 +555,7 @@ function M.show(bufnr, prediction)
         local handled = false
         if cfg.mode == "completion" then
           if hunk.count_new == 1 and cursor and hunk.start_old == cursor_offset then
-            handled = show_inline_insertion(bufnr, hunk, cursor, extmarks[bufnr])
+            handled = show_inline_insertion(bufnr, hunk, cursor, window_start, current_win, extmarks[bufnr])
           elseif hunk.count_new > 1 and not hover_shown then
             local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
             local preview_win, preview_buf = create_hover_window(current_win, hunk.new_lines, syntax_ft)
@@ -580,7 +608,7 @@ function M.show(bufnr, prediction)
       local handled = false
       if cfg.mode == "completion" then
         if fallback.count_new == 1 and cursor and fallback.start_old == cursor_offset then
-          handled = show_inline_insertion(bufnr, fallback, cursor, extmarks[bufnr])
+          handled = show_inline_insertion(bufnr, fallback, cursor, window_start, current_win, extmarks[bufnr])
         elseif fallback.count_new > 1 and not hover_shown then
           local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
           local preview_win, preview_buf = create_hover_window(current_win, fallback.new_lines, syntax_ft)
