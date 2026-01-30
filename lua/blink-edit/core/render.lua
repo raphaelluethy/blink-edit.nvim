@@ -312,7 +312,7 @@ local function is_completion_menu_visible()
   return vim.fn.pumvisible() == 1
 end
 
---- Render a single-line insertion inline at the cursor or in hover window
+--- Render a single-line insertion inline at the cursor (Copilot-style suffix only)
 ---@param bufnr number
 ---@param hunk DiffHunk
 ---@param cursor table|nil
@@ -330,32 +330,60 @@ local function show_inline_insertion(bufnr, hunk, cursor, window_start, current_
     return false
   end
 
-  local text = hunk.new_lines[1] or ""
-  if text == "" then
+  -- Check if this insertion is at or right after the cursor line
+  local cursor_offset = cursor[1] - window_start + 1
+  local at_or_after_cursor_line = (hunk.start_old == cursor_offset or hunk.start_old == cursor_offset + 1)
+
+  if not at_or_after_cursor_line or is_completion_menu_visible() then
     return false
   end
 
-  -- Check if this insertion is at the cursor position on the current line
-  local cursor_offset = cursor[1] - window_start + 1
-  local is_at_cursor_line = hunk.start_old == cursor_offset
+  local ok, line_data = pcall(vim.api.nvim_buf_get_lines, bufnr, line_0, line_0 + 1, false)
+  local current_line = (ok and line_data[1]) or ""
+  local cursor_col = math.min(cursor[2] or #current_line, #current_line)
 
-  -- If at cursor line and completion menu is NOT visible, show inline
-  if is_at_cursor_line and not is_completion_menu_visible() then
-    local ok, line_data = pcall(vim.api.nvim_buf_get_lines, bufnr, line_0, line_0 + 1, false)
-    local current_line = (ok and line_data[1]) or ""
-    local col = math.min(cursor[2] or #current_line, #current_line)
-
-    local mark_id = vim.api.nvim_buf_set_extmark(bufnr, ns, line_0, col, {
-      virt_text = { { text, "BlinkEditPreview" } },
-      virt_text_pos = "overlay",
-      hl_mode = "combine",
-    })
-    table.insert(extmark_list, mark_id)
-    return true
+  local predicted_line = hunk.new_lines[1] or ""
+  if predicted_line == "" then
+    return false
   end
 
-  -- Otherwise, show in hover window to avoid being hidden by completion menu
-  return false
+  -- Copilot-like: only show what continues from the cursor position
+  local prefix = current_line:sub(1, cursor_col)
+  if predicted_line:sub(1, #prefix) ~= prefix then
+    -- Not a same-line continuation; don't fake it
+    return false
+  end
+
+  local suffix = predicted_line:sub(#prefix + 1)
+  if suffix == "" then
+    return false
+  end
+
+  local mark_id = vim.api.nvim_buf_set_extmark(bufnr, ns, line_0, cursor_col, {
+    virt_text = { { suffix, "BlinkEditPreview" } },
+    virt_text_pos = "overlay",
+    hl_mode = "combine",
+  })
+  table.insert(extmark_list, mark_id)
+
+  if vim.g.blink_edit_debug and vim.g.blink_edit_debug >= 2 then
+    log.debug2(string.format("Inline insertion: suffix %q at line %d col %d", suffix, line_0 + 1, cursor_col))
+  end
+
+  return true
+end
+
+--- Build unified diff lines for a replacement hunk
+---@param hunk DiffHunk
+---@return string[]
+local function replacement_diff_lines(hunk)
+  local old_text = table.concat(hunk.old_lines or {}, "\n")
+  local new_text = table.concat(hunk.new_lines or {}, "\n")
+  local unified = vim.diff(old_text, new_text, { result_type = "unified", ctxlen = 2 })
+  if unified and unified ~= "" then
+    return vim.split(unified, "\n", { plain = true })
+  end
+  return hunk.new_lines or {}
 end
 
 --- Show a replacement hunk with [replace] markers and overlay window for new content
@@ -565,15 +593,16 @@ function M.show(bufnr, prediction)
         if cfg.mode == "completion" then
           -- Check if completion menu is visible - if so, use hover window
           local pum_visible = is_completion_menu_visible()
-          
-          if hunk.count_new == 1 and cursor and hunk.start_old == cursor_offset and not pum_visible then
-            -- Only show inline when completion menu is NOT visible
+          local at_or_after_cursor = (hunk.start_old == cursor_offset or hunk.start_old == cursor_offset + 1)
+
+          if hunk.count_new == 1 and cursor and at_or_after_cursor and not pum_visible then
+            -- Try inline ghost text (Copilot-style suffix)
             handled = show_inline_insertion(bufnr, hunk, cursor, window_start, current_win, extmarks[bufnr])
             if handled then
               inline_at_cursor = true
             end
           end
-          
+
           -- Use hover window for: multi-line, not at cursor, or when completion is visible
           if not handled and not hover_shown then
             local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
@@ -599,10 +628,10 @@ function M.show(bufnr, prediction)
         show_modification(bufnr, hunk, window_start, extmarks[bufnr])
       elseif hunk.type == "replacement" then
         local handled = false
-        -- Always use hover window for replacements when completion menu might be visible
-        if cfg.mode == "completion" and not hover_shown then
-          local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
-          local ok, preview_win, preview_buf = pcall(create_hover_window, current_win, hunk.new_lines, syntax_ft)
+        -- Always use hover window for replacements with unified diff
+        if not hover_shown then
+          local diff_lines = replacement_diff_lines(hunk)
+          local ok, preview_win, preview_buf = pcall(create_hover_window, current_win, diff_lines, "diff")
           if ok and preview_win then
             track_overlay_window(bufnr, preview_win, preview_buf)
             hover_shown = true
@@ -638,15 +667,16 @@ function M.show(bufnr, prediction)
       if cfg.mode == "completion" then
         -- Check if completion menu is visible - if so, use hover window
         local pum_visible = is_completion_menu_visible()
-        
-        if fallback.count_new == 1 and cursor and fallback.start_old == cursor_offset and not pum_visible then
-          -- Only show inline when completion menu is NOT visible
+        local at_or_after_cursor = (fallback.start_old == cursor_offset or fallback.start_old == cursor_offset + 1)
+
+        if fallback.count_new == 1 and cursor and at_or_after_cursor and not pum_visible then
+          -- Try inline ghost text (Copilot-style suffix)
           handled = show_inline_insertion(bufnr, fallback, cursor, window_start, current_win, extmarks[bufnr])
           if handled then
             inline_at_cursor = true
           end
         end
-        
+
         -- Use hover window for: multi-line, not at cursor, or when completion is visible
         if not handled and not hover_shown then
           local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
@@ -667,10 +697,10 @@ function M.show(bufnr, prediction)
       show_modification(bufnr, fallback, window_start, extmarks[bufnr])
     elseif fallback.type == "replacement" then
       local handled = false
-      -- Always use hover window for replacements when completion menu might be visible
-      if cfg.mode == "completion" and not hover_shown then
-        local syntax_ft = vim.api.nvim_get_option_value("filetype", { buf = bufnr })
-        local ok, preview_win, preview_buf = pcall(create_hover_window, current_win, fallback.new_lines, syntax_ft)
+      -- Always use hover window for replacements with unified diff
+      if not hover_shown then
+        local diff_lines = replacement_diff_lines(fallback)
+        local ok, preview_win, preview_buf = pcall(create_hover_window, current_win, diff_lines, "diff")
         if ok and preview_win then
           track_overlay_window(bufnr, preview_win, preview_buf)
           hover_shown = true
