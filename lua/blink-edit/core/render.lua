@@ -154,7 +154,7 @@ local function create_hover_window(parent_win, content, syntax_ft)
     height = #content_lines,
     style = "minimal",
     border = "rounded",
-    zindex = 50,
+    zindex = 1100, -- Above nvim-cmp (1001) and other completion menus
     focusable = false,
   })
 
@@ -253,7 +253,8 @@ local function show_deletion(bufnr, hunk, window_start, extmark_list)
   local line_count = vim.api.nvim_buf_line_count(bufnr)
 
   for i = 1, hunk.count_old do
-    local lnum = window_start + hunk.start_old + i - 2 -- 0-indexed
+    -- window_start is 1-indexed, hunk.start_old is 1-indexed, i is 1-indexed offset
+    local lnum = window_start + hunk.start_old + i - 3 -- 0-indexed
     if lnum >= 0 and lnum < line_count then
       local mark_id = vim.api.nvim_buf_set_extmark(bufnr, ns, lnum, 0, {
         virt_text = { { " [delete]", "BlinkEditDeletion" } },
@@ -271,12 +272,14 @@ local function show_deletion(bufnr, hunk, window_start, extmark_list)
 end
 
 --- Show a modification hunk with inline ghost text for each changed line
+--- Only shows inline ghost text if the prediction is a pure suffix continuation.
+--- If the prediction disagrees with what the user typed, returns false so a jump marker is shown instead.
 ---@param bufnr number
 ---@param hunk DiffHunk
 ---@param window_start number 1-indexed
 ---@param cursor table|nil [row, col] where row is 1-indexed, col is 0-indexed
 ---@param extmark_list number[] List to append extmark IDs to
----@return boolean at_cursor Whether any modification was shown at cursor position
+---@return boolean at_cursor Whether inline modification was shown at cursor position
 local function show_modification(bufnr, hunk, window_start, cursor, extmark_list)
   local line_count = vim.api.nvim_buf_line_count(bufnr)
 
@@ -289,7 +292,9 @@ local function show_modification(bufnr, hunk, window_start, cursor, extmark_list
   local cursor_col = cursor and cursor[2] or nil -- 0-indexed byte column
 
   for _, lc in ipairs(hunk.line_changes) do
-    local lnum = window_start + hunk.start_old + lc.index - 2 -- 0-indexed buffer line
+    -- window_start is 1-indexed, hunk.start_old is 1-indexed relative to snapshot, lc.index is 1-indexed within hunk
+    -- Buffer line (0-indexed) = (window_start - 1) + (hunk.start_old - 1) + (lc.index - 1)
+    local lnum = window_start + hunk.start_old + lc.index - 3 -- 0-indexed buffer line
     if lnum >= 0 and lnum < line_count then
       local change = lc.change
 
@@ -300,27 +305,40 @@ local function show_modification(bufnr, hunk, window_start, cursor, extmark_list
       -- Determine column position for the extmark
       local col = change.col
       local display_text = change.text
+      local is_pure_suffix = false
 
       -- Check if this modification is on the cursor line
       if cursor_row and lnum == cursor_row - 1 then
-        at_cursor = true
-        -- For cursor-line modifications, use cursor column and extract suffix
         if cursor_col then
           -- Get text before cursor (what user has typed)
           local before_cursor = current_line:sub(1, cursor_col)
           -- The new line content from the prediction
           local new_line = hunk.new_lines and hunk.new_lines[lc.index] or (current_line:sub(1, change.col) .. change.text)
 
-          -- Find what suffix to show after cursor
+          -- STRICT RULE: Only show inline ghost text if prediction is a pure suffix continuation
+          -- The prediction must agree with everything the user has typed so far
           if new_line:sub(1, #before_cursor) == before_cursor then
             -- Prediction agrees with what's before cursor - show continuation
             display_text = new_line:sub(cursor_col + 1)
             col = cursor_col
-          elseif cursor_col >= #current_line then
-            -- Cursor at EOL - show the change text as suffix
-            col = cursor_col
+            is_pure_suffix = true
+            at_cursor = true
+          else
+            -- Prediction disagrees with what user typed - don't show inline
+            -- Let the caller show a jump indicator instead
+            if vim.g.blink_edit_debug and vim.g.blink_edit_debug >= 2 then
+              log.debug2(string.format("Modification: disagreement at line %d - not showing inline", lnum + 1))
+            end
+            goto continue
           end
         end
+      else
+        -- NOT on cursor line - do NOT show inline ghost text for off-cursor modifications
+        -- The jump indicator will point to this hunk instead
+        if vim.g.blink_edit_debug and vim.g.blink_edit_debug >= 2 then
+          log.debug2(string.format("Modification: skipping off-cursor line %d", lnum + 1))
+        end
+        goto continue
       end
 
       -- Clamp column to line length
@@ -339,7 +357,8 @@ local function show_modification(bufnr, hunk, window_start, cursor, extmark_list
       table.insert(extmark_list, mark_id)
 
       if vim.g.blink_edit_debug and vim.g.blink_edit_debug >= 2 then
-        log.debug2(string.format("Modification: %s at line %d col %d: %q", change.type, lnum + 1, col, display_text))
+        log.debug2(string.format("Modification: %s at line %d col %d: %q (pure_suffix=%s)", 
+          change.type, lnum + 1, col, display_text, tostring(is_pure_suffix)))
       end
 
       ::continue::
@@ -427,7 +446,8 @@ local function show_inline_insertion(bufnr, hunk, cursor, window_start, current_
   return true
 end
 
---- Build unified diff lines for a replacement hunk
+--- Build unified diff lines for a replacement hunk (for hover preview)
+--- Uses vim.diff to generate a unified diff showing old vs new lines.
 ---@param hunk DiffHunk
 ---@return string[]
 local function replacement_diff_lines(hunk)
@@ -451,7 +471,8 @@ local function show_replacement(bufnr, hunk, window_start, current_win, extmark_
 
   -- Mark old lines with [replace]
   for i = 1, hunk.count_old do
-    local lnum = window_start + hunk.start_old + i - 2 -- 0-indexed
+    -- window_start is 1-indexed, hunk.start_old is 1-indexed, i is 1-indexed offset
+    local lnum = window_start + hunk.start_old + i - 3 -- 0-indexed
     if lnum >= 0 and lnum < line_count then
       local mark_id = vim.api.nvim_buf_set_extmark(bufnr, ns, lnum, 0, {
         virt_text = { { " [replace]", "BlinkEditDeletion" } },
@@ -463,7 +484,8 @@ local function show_replacement(bufnr, hunk, window_start, current_win, extmark_
 
   -- Show new content as overlay below last old line
   if hunk.count_new > 0 then
-    local anchor_line_0 = window_start + hunk.start_old + hunk.count_old - 2 -- 0-indexed
+    -- Last old line: (window_start - 1) + (hunk.start_old - 1) + (hunk.count_old - 1)
+    local anchor_line_0 = window_start + hunk.start_old + hunk.count_old - 3 -- 0-indexed
     if anchor_line_0 < 0 then
       anchor_line_0 = 0
     end
@@ -541,23 +563,87 @@ local function show_jump_indicator_inline(bufnr, line_0, extmark_list)
   table.insert(extmark_list, mark_id)
 end
 
---- Show a jump indicator for the next hunk (rendered as a virtual line below the target)
+--- Generate unified diff lines for a hunk (for hover preview)
+---@param hunk DiffHunk
+---@return string[]
+local function generate_hunk_diff_lines(hunk)
+  local lines = {}
+  local max_lines = 10 -- Limit preview size
+
+  if hunk.type == "insertion" then
+    for i, line in ipairs(hunk.new_lines or {}) do
+      if i > max_lines then
+        table.insert(lines, "+" .. "… (" .. (#hunk.new_lines - max_lines) .. " more lines)")
+        break
+      end
+      table.insert(lines, "+" .. line)
+    end
+  elseif hunk.type == "deletion" then
+    for i, line in ipairs(hunk.old_lines or {}) do
+      if i > max_lines then
+        table.insert(lines, "-" .. "… (" .. (#hunk.old_lines - max_lines) .. " more lines)")
+        break
+      end
+      table.insert(lines, "-" .. line)
+    end
+  elseif hunk.type == "modification" or hunk.type == "replacement" then
+    -- Simple diff format: show old lines as deletions, new lines as additions
+    -- Skip vim.diff to avoid "No newline at end of file" artifacts
+    local count = 0
+    for _, line in ipairs(hunk.old_lines or {}) do
+      count = count + 1
+      if count > max_lines then
+        table.insert(lines, "… (" .. (#(hunk.old_lines or {}) + #(hunk.new_lines or {}) - max_lines) .. " more lines)")
+        return lines
+      end
+      table.insert(lines, "-" .. line)
+    end
+    for _, line in ipairs(hunk.new_lines or {}) do
+      count = count + 1
+      if count > max_lines then
+        table.insert(lines, "… (" .. (#(hunk.old_lines or {}) + #(hunk.new_lines or {}) - max_lines) .. " more lines)")
+        return lines
+      end
+      table.insert(lines, "+" .. line)
+    end
+  end
+
+  return lines
+end
+
+--- Show a jump indicator for the next hunk (rendered at EOL of target line)
+--- Also shows a diff hover window to preview what will change
 ---@param bufnr number
 ---@param hunk DiffHunk
 ---@param window_start number
 ---@param extmark_list number[]
-local function show_jump_indicator(bufnr, hunk, window_start, extmark_list)
+---@param current_win number
+local function show_jump_indicator(bufnr, hunk, window_start, extmark_list, current_win)
   local anchor_line_0 = get_jump_anchor_line(bufnr, hunk, window_start)
   if anchor_line_0 == nil then
     return
   end
 
-  -- Render as a virtual line below the target hunk
+  -- Render at the right side of the target line (Cursor/Copilot style)
   local mark_id = vim.api.nvim_buf_set_extmark(bufnr, ns, anchor_line_0, 0, {
-    virt_lines = { { { JUMP_TEXT, "BlinkEditJump" } } },
-    virt_lines_above = false, -- Show below the anchor line
+    virt_text = { { JUMP_TEXT, "BlinkEditJump" } },
+    virt_text_pos = "right_align",
+    hl_mode = "combine",
+    priority = 2000,
   })
   table.insert(extmark_list, mark_id)
+
+  -- Show diff hover window for off-cursor changes
+  local diff_lines = generate_hunk_diff_lines(hunk)
+  if #diff_lines > 0 then
+    local ok, preview_win, preview_buf = pcall(create_hover_window, current_win, diff_lines, "diff")
+    if ok and preview_win then
+      track_overlay_window(bufnr, preview_win, preview_buf)
+      if vim.g.blink_edit_debug then
+        log.debug("Jump diff hover created with " .. #diff_lines .. " lines")
+      end
+    end
+  end
 end
 
 -- =============================================================================
@@ -781,10 +867,11 @@ function M.show(bufnr, prediction)
     first_hunk = fallback
   end
 
-  if first_hunk and not inline_at_cursor then
+  if first_hunk and not inline_at_cursor and not hover_shown then
     -- Only show TAB indicator when not showing inline at cursor
     -- (ghost text is already visible on the same line)
-    show_jump_indicator(bufnr, first_hunk, window_start, extmarks[bufnr])
+    -- Also skip if hover was already shown for a replacement
+    show_jump_indicator(bufnr, first_hunk, window_start, extmarks[bufnr], current_win)
   end
 
   if vim.g.blink_edit_debug then
