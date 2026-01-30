@@ -40,7 +40,14 @@ function M.request(opts, callback)
 
   -- Add body
   if body and #body > 0 then
-    table.insert(args, "-d")
+    -- Check if body contains binary/null bytes
+    local has_binary = body:find("%z") ~= nil
+    if has_binary then
+      -- Use --data-binary for binary data (e.g., brotli compressed)
+      table.insert(args, "--data-binary")
+    else
+      table.insert(args, "-d")
+    end
     table.insert(args, body)
   end
 

@@ -318,14 +318,67 @@ function M.complete(opts, callback)
   log.debug(string.format("Sweep token length: %d", #token))
   log.debug(string.format("Sweep token first/last chars: %s...%s", token:sub(1, 4), token:sub(-4)))
 
+  -- Encode payload
+  local body = vim.json.encode(payload)
+  local headers = {
+    ["Content-Type"] = "application/json",
+    ["Authorization"] = "Bearer " .. token,
+    ["Connection"] = "keep-alive",
+  }
+
+  -- Try to compress with brotli if available (like Zed does)
+  local use_compression = false
+  local brotli_cmd = sweep_cfg.brotli_cmd or "brotli"
+  local compressed_body = nil
+  
+  -- Check if brotli CLI is available
+  local brotli_check = vim.fn.executable(brotli_cmd)
+  if brotli_check == 1 then
+    -- Create temp files for compression
+    local temp_input = vim.fn.tempname() .. ".json"
+    local temp_output = temp_input .. ".br"
+    
+    -- Write body to temp file
+    local f = io.open(temp_input, "w")
+    if f then
+      f:write(body)
+      f:close()
+      
+      -- Compress with brotli (quality 1, as used by Zed)
+      local cmd = string.format("%s -q 1 -o %s %s 2>/dev/null", brotli_cmd, temp_output, temp_input)
+      local result = os.execute(cmd)
+      
+      if result == 0 then
+        -- Read compressed data
+        local cf = io.open(temp_output, "rb")
+        if cf then
+          compressed_body = cf:read("*all")
+          cf:close()
+          use_compression = true
+          log.debug("Using brotli compression for Sweep request")
+        end
+      end
+      
+      -- Cleanup temp files
+      os.remove(temp_input)
+      os.remove(temp_output)
+    end
+  end
+  
+  -- Use compressed body if available, otherwise uncompressed
+  if use_compression and compressed_body then
+    body = compressed_body
+    headers["Content-Encoding"] = "br"
+    log.debug(string.format("Compressed request body: %d -> %d bytes", #vim.json.encode(payload), #body))
+  else
+    log.debug("Sending uncompressed request (brotli not available)")
+  end
+
   local request_id = transport.request({
     url = url .. endpoint,
     method = "POST",
-    headers = {
-      ["Content-Type"] = "application/json",
-      ["Authorization"] = "Bearer " .. token,
-    },
-    body = vim.json.encode(payload),
+    headers = headers,
+    body = body,
     timeout = cfg.llm.timeout_ms,
   }, function(err, response)
     if err then
@@ -335,10 +388,23 @@ function M.complete(opts, callback)
 
     -- Check HTTP status code first
     local status = response.status or 0
+    
+    -- Debug: log full response on error
+    if status >= 400 then
+      log.debug(string.format("Sweep HTTP error %d - Response body: %s", status, vim.inspect(response.body)))
+      log.debug(string.format("Sweep HTTP error %d - Response headers: %s", status, vim.inspect(response.headers)))
+    end
+    
     if status == 401 or status == 403 then
+      local error_detail = ""
+      if type(response.body) == "string" and #response.body > 0 then
+        error_detail = " Response: " .. response.body:sub(1, 200)
+      elseif type(response.body) == "table" then
+        error_detail = " Response: " .. vim.inspect(response.body):sub(1, 200)
+      end
       callback({
         type = "auth",
-        message = "Authentication failed (HTTP " .. status .. "). Check your SWEEP_AI_TOKEN.",
+        message = "Authentication failed (HTTP " .. status .. "). Check your SWEEP_AI_TOKEN." .. error_detail,
         code = status,
       }, nil)
       return
