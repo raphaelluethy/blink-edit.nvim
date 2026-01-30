@@ -113,7 +113,7 @@ function M.request(opts, callback)
         if line:match("^HTTP/") then
           last_header_start = i
           last_header_end = nil
-        elseif last_header_start and line == "" then
+        elseif last_header_start and not last_header_end and line == "" then
           last_header_end = i
         end
       end
