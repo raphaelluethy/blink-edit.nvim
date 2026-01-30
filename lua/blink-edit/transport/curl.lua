@@ -23,13 +23,15 @@ function M.request(opts, callback)
   local body = opts.body or ""
 
   -- Build curl arguments - output only body, use jq to extract status
+  local status_marker = "__HTTP_STATUS__"
   local args = {
     "-s", -- Silent mode
     "-S", -- Show errors
     "--compressed", -- Automatically decompress responses (brotli, gzip, etc.)
     "-X", method,
     "--max-time", tostring(timeout / 1000),
-    "-w", "\n%{http_code}", -- Append status code
+    "-D", "-", -- Include response headers in stdout
+    "-w", string.format("\n%s:%%{http_code}", status_marker), -- Append status code
   }
 
   -- Add custom headers
@@ -88,20 +90,55 @@ function M.request(opts, callback)
       local raw_output = result.stdout or ""
       log.debug(string.format("curl raw output length: %d", #raw_output))
       
-      -- Find last newline to separate body from status code
-      local last_newline = raw_output:find("\n[^\n]*$")
-      local response_body = ""
+      -- Normalize newlines
+      raw_output = raw_output:gsub("\r\n", "\n")
+
+      -- Extract status code marker if present
       local status_code = 0
-      
-      if last_newline then
-        response_body = raw_output:sub(1, last_newline - 1)
-        local status_str = raw_output:sub(last_newline + 1):match("^%d+")
-        if status_str then
-          status_code = tonumber(status_str) or 0
+      local status_pattern = "\n" .. status_marker .. ":(%d%d%d)%s*$"
+      local status_str = raw_output:match(status_pattern)
+      if status_str then
+        status_code = tonumber(status_str) or 0
+        raw_output = raw_output:gsub("\n" .. status_marker .. ":%d%d%d%s*$", "")
+      end
+
+      -- Parse headers (if present) and body
+      local headers = {}
+      local response_body = raw_output
+      local lines = vim.split(raw_output, "\n", { plain = true })
+      local last_header_start = nil
+      local last_header_end = nil
+
+      for i, line in ipairs(lines) do
+        if line:match("^HTTP/") then
+          last_header_start = i
+          last_header_end = nil
+        elseif last_header_start and line == "" then
+          last_header_end = i
         end
-      else
-        -- No newline found, entire output is body
-        response_body = raw_output
+      end
+
+      if last_header_start and last_header_end then
+        for i = last_header_start + 1, last_header_end - 1 do
+          local key, value = lines[i]:match("^([^:]+):%s*(.*)$")
+          if key then
+            headers[key:lower()] = value
+          end
+        end
+        local body_lines = {}
+        for i = last_header_end + 1, #lines do
+          table.insert(body_lines, lines[i])
+        end
+        response_body = table.concat(body_lines, "\n")
+      end
+
+      if status_code == 0 and last_header_start then
+        local status_line = lines[last_header_start]
+        local header_status = status_line:match("^HTTP/%d+%.%d+%s+(%d%d%d)")
+          or status_line:match("^HTTP/%d+%s+(%d%d%d)")
+        if header_status then
+          status_code = tonumber(header_status) or 0
+        end
       end
       
       log.debug(string.format("curl status code: %d", status_code))
@@ -118,7 +155,7 @@ function M.request(opts, callback)
 
       callback(nil, {
         status = status_code,
-        headers = {}, -- Headers not parsed, but not needed for Sweep API
+        headers = headers,
         body = json_body or response_body,
       })
     end)

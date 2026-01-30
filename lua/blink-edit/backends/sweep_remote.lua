@@ -8,6 +8,22 @@ local config = require("blink-edit.config")
 local log = require("blink-edit.log")
 local brotli = require("blink-edit.utils.brotli")
 
+local function decode_ndjson(body)
+  if not body or body == "" then
+    return nil
+  end
+  for line in body:gmatch("[^\n]+") do
+    local trimmed = vim.trim(line)
+    if trimmed ~= "" then
+      local ok, decoded = pcall(vim.json.decode, trimmed)
+      if ok then
+        return decoded
+      end
+    end
+  end
+  return nil
+end
+
 -- =============================================================================
 -- Byte Offset Conversion Helpers
 -- =============================================================================
@@ -390,6 +406,9 @@ function M.complete(opts, callback)
 
     -- Parse response
     local body = response.body
+    local headers = response.headers or {}
+    local content_type = headers["content-type"] or headers["Content-Type"]
+    local is_ndjson = type(content_type) == "string" and content_type:find("application/x-ndjson", 1, true)
     
     -- Debug: log raw response
     log.debug(string.format("Sweep response status: %d", response.status or 0))
@@ -400,12 +419,25 @@ function M.complete(opts, callback)
     end
     
     if type(body) == "string" then
-      local ok, decoded = pcall(vim.json.decode, body)
-      if not ok then
-        callback({ type = "parse", message = "Failed to parse JSON response: " .. tostring(body):sub(1, 100) }, nil)
+      if body == "" then
+        callback({ type = "parse", message = "no completion" }, nil)
         return
       end
-      body = decoded
+      if is_ndjson then
+        local decoded = decode_ndjson(body)
+        if not decoded then
+          callback({ type = "parse", message = "no completion" }, nil)
+          return
+        end
+        body = decoded
+      else
+        local ok, decoded = pcall(vim.json.decode, body)
+        if not ok then
+          callback({ type = "parse", message = "Failed to parse JSON response: " .. tostring(body):sub(1, 100) }, nil)
+          return
+        end
+        body = decoded
+      end
     end
 
     -- Check for API errors in response body
